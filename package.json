@@ -1,0 +1,25 @@
+{
+  "name": "telegram-claude-bot",
+  "version": "1.0.0",
+  "description": "Telegram бот для удаленного доступа к Claude Code CLI",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "node bot.js"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "claude",
+    "cli"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "input": "^1.0.1",
+    "node-telegram-bot-api": "^0.66.0",
+    "puppeteer-core": "^24.37.3",
+    "telegram": "^2.26.22"
+  }
+}
