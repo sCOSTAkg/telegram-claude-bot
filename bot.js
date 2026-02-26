@@ -8,7 +8,7 @@ const { NewMessage } = require('telegram/events');
 const { Api } = require('telegram');
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
-const allowedIds = process.env.ALLOWED_USER_IDS.split(',').map(Number);
+const adminIds = (process.env.ALLOWED_USER_IDS || '').split(',').map(Number).filter(Boolean);
 const API = `https://api.telegram.org/bot${token}`;
 const FILE_API = `https://api.telegram.org/file/bot${token}`;
 const CONFIG_PATH = path.join(__dirname, 'config.json');
@@ -115,7 +115,7 @@ function autoSelectModel(text) {
   return { model: 'gemini-2.5-flash', reason: '💬 Общий' };
 }
 
-async function callAnthropic(modelId, messages, systemPrompt) {
+async function callAnthropic(modelId, messages, systemPrompt, allowMcp = true) {
   // Через локальный Claude Code CLI
   const cliModelMap = { 'claude-sonnet-4-5-20250929': 'sonnet', 'claude-opus-4-6': 'opus', 'claude-haiku-4-5-20251001': 'haiku' };
   const cliModel = cliModelMap[modelId] || modelId;
@@ -136,11 +136,11 @@ async function callAnthropic(modelId, messages, systemPrompt) {
   return new Promise((resolve, reject) => {
     const mcpSettingsPath = path.join(process.env.HOME || '/Users/guest1', '.claude', 'settings.json');
     const args = ['-p', '--model', cliModel, '--dangerously-skip-permissions'];
-    if (fs.existsSync(mcpSettingsPath)) args.push('--mcp-config', mcpSettingsPath);
+    if (allowMcp && fs.existsSync(mcpSettingsPath)) args.push('--mcp-config', mcpSettingsPath);
     if (systemPrompt) args.push('--system-prompt', systemPrompt);
 
     const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'CLAUDECODE'));
-    const child = spawn(CLAUDE_PATH, args, { cwd: config.workDir, env: cleanEnv, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(CLAUDE_PATH, args, { cwd: process.env.WORKING_DIR || '/Users/guest1', env: cleanEnv, stdio: ['pipe', 'pipe', 'pipe'] });
 
     child.on('error', (err) => reject(new Error(`Claude CLI: ${err.message}`)));
     child.stdin.write(prompt);
@@ -213,13 +213,13 @@ async function callGroqChat(modelId, messages, systemPrompt) {
   return { text: data.choices[0].message.content, usage: data.usage };
 }
 
-async function callAI(model, messages, systemPrompt) {
+async function callAI(model, messages, systemPrompt, allowMcp = true) {
   const start = Date.now();
   const provider = getProvider(model);
   const modelId = MODEL_MAP[model] || model;
   let result;
   switch (provider) {
-    case 'anthropic': result = await callAnthropic(modelId, messages, systemPrompt); break;
+    case 'anthropic': result = await callAnthropic(modelId, messages, systemPrompt, allowMcp); break;
     case 'openai': result = await callOpenAI(modelId, messages, systemPrompt); break;
     case 'google': result = await callGemini(modelId, messages, systemPrompt); break;
     case 'groq': result = await callGroqChat(modelId, messages, systemPrompt); break;
@@ -259,7 +259,7 @@ async function parseSSEStream(response, extractContent, onChunk) {
   return accumulated;
 }
 
-async function callAnthropicStream(modelId, messages, systemPrompt, onChunk) {
+async function callAnthropicStream(modelId, messages, systemPrompt, onChunk, allowMcp = true) {
   const cliModelMap = { 'claude-sonnet-4-5-20250929': 'sonnet', 'claude-opus-4-6': 'opus', 'claude-haiku-4-5-20251001': 'haiku' };
   const cliModel = cliModelMap[modelId] || modelId;
 
@@ -278,11 +278,11 @@ async function callAnthropicStream(modelId, messages, systemPrompt, onChunk) {
   return new Promise((resolve, reject) => {
     const mcpSettingsPath = path.join(process.env.HOME || '/Users/guest1', '.claude', 'settings.json');
     const args = ['-p', '--model', cliModel, '--dangerously-skip-permissions'];
-    if (fs.existsSync(mcpSettingsPath)) args.push('--mcp-config', mcpSettingsPath);
+    if (allowMcp && fs.existsSync(mcpSettingsPath)) args.push('--mcp-config', mcpSettingsPath);
     if (systemPrompt) args.push('--system-prompt', systemPrompt);
 
     const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'CLAUDECODE'));
-    const child = spawn(CLAUDE_PATH, args, { cwd: config.workDir, env: cleanEnv, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(CLAUDE_PATH, args, { cwd: process.env.WORKING_DIR || '/Users/guest1', env: cleanEnv, stdio: ['pipe', 'pipe', 'pipe'] });
 
     child.on('error', (err) => reject(new Error(`Claude CLI: ${err.message}`)));
     child.stdin.write(prompt);
@@ -366,13 +366,13 @@ async function callGroqStream(modelId, messages, systemPrompt, onChunk) {
   return { text: text || 'Готово (без вывода)', usage: null };
 }
 
-async function callAIStream(model, messages, systemPrompt, onChunk) {
+async function callAIStream(model, messages, systemPrompt, onChunk, allowMcp = true) {
   const start = Date.now();
   const provider = getProvider(model);
   const modelId = MODEL_MAP[model] || model;
   let result;
   switch (provider) {
-    case 'anthropic': result = await callAnthropicStream(modelId, messages, systemPrompt, onChunk); break;
+    case 'anthropic': result = await callAnthropicStream(modelId, messages, systemPrompt, onChunk, allowMcp); break;
     case 'openai': result = await callOpenAIStream(modelId, messages, systemPrompt, onChunk); break;
     case 'google': result = await callGeminiStream(modelId, messages, systemPrompt, onChunk); break;
     case 'groq': result = await callGroqStream(modelId, messages, systemPrompt, onChunk); break;
@@ -390,16 +390,143 @@ fs.writeFileSync(PID_FILE, String(process.pid));
 process.on('exit', () => { try { fs.unlinkSync(PID_FILE); } catch(e) {} });
 
 // === Конфигурация ===
-const defaultConfig = { model: 'claude-sonnet', workDir: process.env.WORKING_DIR || '/Users/guest1', timeout: 300, historySize: 20, systemPrompt: '', channels: [], monitorInterval: 60, mtprotoSession: '', templates: [], pins: [], autoModel: true, reminders: [], streaming: true, agentMode: true, agentMaxSteps: 5 };
-let config = { ...defaultConfig };
+// Глобальный конфиг (API ключи, MTProto, polling — общие для всех)
+const defaultGlobalConfig = { mtprotoSession: '', channels: [], monitorInterval: 60, reminders: [] };
+let config = { ...defaultGlobalConfig };
 if (fs.existsSync(CONFIG_PATH)) {
-  try { config = { ...defaultConfig, ...JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) }; } catch (e) {}
+  try { config = { ...defaultGlobalConfig, ...JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) }; } catch (e) {}
 }
 function saveConfig() { fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2)); }
 
-// Миграция старых имён моделей
-if (['sonnet', 'opus', 'haiku'].includes(config.model)) {
-  config.model = 'claude-' + config.model;
+// Per-user конфиг (настройки, шаблоны, режимы — у каждого свои)
+const USER_CONFIGS_PATH = path.join(__dirname, 'users.json');
+const defaultUserConfig = { model: 'gemini-3.1-pro', workDir: '/tmp', timeout: 300, historySize: 20, systemPrompt: '', skills: [], pins: [], autoModel: false, streaming: true, agentMode: true, agentMaxSteps: 10, multiAgent: true, role: 'user', banned: false };
+const userConfigs = new Map(); // chatId -> config
+
+const SKILL_CATEGORIES = [
+  { id: 'code', label: '💻 Код' },
+  { id: 'text', label: '✍️ Текст' },
+  { id: 'analysis', label: '🔍 Анализ' },
+  { id: 'other', label: '📦 Другое' },
+];
+
+const PRESET_SKILLS = [
+  { name: 'review', description: 'Code Review', category: 'code', prompt: 'Проведи code review этого кода. Оцени: структуру, читаемость, баги, производительность, безопасность. Предложи улучшения.' },
+  { name: 'summary', description: 'Краткое резюме', category: 'text', prompt: 'Дай краткое резюме в 3-5 пунктов. Выдели главные идеи и выводы.' },
+  { name: 'refactor', description: 'Рефакторинг кода', category: 'code', prompt: 'Выполни рефакторинг этого кода. Улучши структуру, убери дублирование. Покажи результат.' },
+  { name: 'translate', description: 'Перевод текста', category: 'text', prompt: 'Переведи текст на русский (если на иностранном) или на английский (если на русском). Сохрани стиль и тон.' },
+  { name: 'explain', description: 'Объяснение', category: 'analysis', prompt: 'Объясни это простым языком. Разбери по шагам, приведи примеры.' },
+  { name: 'debug', description: 'Поиск багов', category: 'code', prompt: 'Найди баги и проблемы в этом коде. Объясни каждую проблему и как её исправить.' },
+];
+
+// === Мульти-агентная система ===
+const AGENT_ROLES = {
+  orchestrator: { icon: '🎯', label: 'Оркестратор', desc: 'Координирует субагентов, декомпозирует задачи' },
+  coder: { icon: '💻', label: 'Кодер', desc: 'Пишет и модифицирует код' },
+  researcher: { icon: '🔍', label: 'Аналитик', desc: 'Исследует, анализирует, ищет информацию' },
+  reviewer: { icon: '🔎', label: 'Ревьюер', desc: 'Проверяет качество, находит ошибки' },
+  writer: { icon: '✍️', label: 'Писатель', desc: 'Создаёт тексты, документацию' },
+  executor: { icon: '⚡', label: 'Исполнитель', desc: 'Выполняет bash-команды и системные действия' },
+};
+
+const SUB_AGENT_PROMPT_TEMPLATE = (role, task, context) => {
+  const roleInfo = AGENT_ROLES[role] || AGENT_ROLES.executor;
+  return `Ты — ${roleInfo.label} (${roleInfo.desc}) в мульти-агентной системе.
+
+ТВОЯ РОЛЬ: ${roleInfo.icon} ${roleInfo.label}
+ЗАДАЧА: ${task}
+${context ? `\nКОНТЕКСТ ОТ ОРКЕСТРАТОРА:\n${context}` : ''}
+
+ПРАВИЛА:
+- Выполняй ТОЛЬКО свою задачу, не отвлекайся
+- Будь конкретным и структурированным
+- Если нужно выполнить действие, используй формат [ACTION: тип]...[/ACTION]
+- В конце дай чёткий результат, начиная с [RESULT]
+- Если не можешь выполнить — объясни почему, начиная с [ERROR]
+- Отвечай кратко и по делу`;
+};
+
+// Трекер состояния мульти-агентных задач
+const multiAgentTasks = new Map(); // chatId -> { orchestratorMsgId, agents: [...], log: [...], startTime }
+
+function loadUserConfigs() {
+  if (!fs.existsSync(USER_CONFIGS_PATH)) return;
+  try {
+    const data = JSON.parse(fs.readFileSync(USER_CONFIGS_PATH, 'utf8'));
+    for (const [id, cfg] of Object.entries(data)) {
+      userConfigs.set(Number(id), { ...defaultUserConfig, ...cfg });
+    }
+  } catch (e) {}
+}
+loadUserConfigs();
+
+// Миграция templates → skills
+for (const [id, cfg] of userConfigs) {
+  if (cfg.templates && cfg.templates.length > 0 && (!cfg.skills || cfg.skills.length === 0)) {
+    cfg.skills = cfg.templates;
+  }
+  delete cfg.templates;
+  // Миграция навыков: добавляем новые поля если отсутствуют
+  if (cfg.skills && cfg.skills.length > 0) {
+    for (const skill of cfg.skills) {
+      if (skill.description === undefined) skill.description = '';
+      if (skill.category === undefined) skill.category = 'other';
+      if (skill.uses === undefined) skill.uses = 0;
+      if (skill.lastUsed === undefined) skill.lastUsed = null;
+    }
+  }
+}
+saveUserConfigs();
+
+function saveUserConfigs() {
+  const obj = {};
+  for (const [id, cfg] of userConfigs) obj[id] = cfg;
+  fs.writeFileSync(USER_CONFIGS_PATH, JSON.stringify(obj, null, 2));
+}
+
+function getUserConfig(chatId) {
+  if (!userConfigs.has(chatId)) {
+    // Админы получают полный доступ и домашнюю директорию
+    const isAdmin = adminIds.includes(chatId);
+    userConfigs.set(chatId, { ...defaultUserConfig, role: isAdmin ? 'admin' : 'user', workDir: isAdmin ? (process.env.WORKING_DIR || '/Users/guest1') : '/tmp' });
+    saveUserConfigs();
+  }
+  return userConfigs.get(chatId);
+}
+
+function saveUserConfig(chatId) {
+  saveUserConfigs();
+}
+
+function isAdmin(chatId) {
+  return getUserConfig(chatId).role === 'admin';
+}
+
+// Миграция из старого конфига (если есть per-user поля в глобальном)
+if (config.model || config.workDir || config.systemPrompt !== undefined) {
+  // Перенести старые настройки первому админу
+  const firstAdmin = adminIds[0];
+  if (firstAdmin && !userConfigs.has(firstAdmin)) {
+    const migrated = { ...defaultUserConfig, role: 'admin' };
+    if (config.model) migrated.model = config.model;
+    if (config.workDir) migrated.workDir = config.workDir;
+    if (config.timeout) migrated.timeout = config.timeout;
+    if (config.historySize) migrated.historySize = config.historySize;
+    if (config.systemPrompt) migrated.systemPrompt = config.systemPrompt;
+    if (config.templates?.length) migrated.skills = config.templates;
+    if (config.pins?.length) migrated.pins = config.pins;
+    if (config.autoModel !== undefined) migrated.autoModel = config.autoModel;
+    if (config.streaming !== undefined) migrated.streaming = config.streaming;
+    if (config.agentMode !== undefined) migrated.agentMode = config.agentMode;
+    if (config.agentMaxSteps) migrated.agentMaxSteps = config.agentMaxSteps;
+    userConfigs.set(firstAdmin, migrated);
+    saveUserConfigs();
+  }
+  // Очистить per-user поля из глобального конфига
+  delete config.model; delete config.workDir; delete config.timeout;
+  delete config.historySize; delete config.systemPrompt; delete config.templates;
+  delete config.pins; delete config.autoModel; delete config.streaming;
+  delete config.agentMode; delete config.agentMaxSteps;
   saveConfig();
 }
 
@@ -411,7 +538,8 @@ function addToHistory(chatId, role, text) {
   const history = chatHistory.get(chatId);
   const trimmed = text.length > 2000 ? text.slice(0, 2000) + '...' : text;
   history.push({ role, text: trimmed });
-  while (history.length > config.historySize) history.shift();
+  const uc = getUserConfig(chatId);
+  while (history.length > (uc.historySize || 20)) history.shift();
 }
 
 function getHistoryPrompt(chatId, currentMsg) {
@@ -523,28 +651,28 @@ function cleanMarkdown(text) {
 
 // === Отправка файлов в Telegram (async) ===
 async function sendDocument(chatId, filePath, caption = '') {
-  const resolved = path.resolve(config.workDir, filePath);
+  const resolved = path.resolve(getUserConfig(chatId).workDir, filePath);
   if (!fs.existsSync(resolved)) { send(chatId, `❌ Файл не найден: ${resolved}`); return; }
   const res = await tgUpload('sendDocument', chatId, 'document', resolved, caption);
   if (!res.ok) send(chatId, `❌ Ошибка отправки файла`);
 }
 
 async function sendPhoto(chatId, filePath, caption = '') {
-  const resolved = path.resolve(config.workDir, filePath);
+  const resolved = path.resolve(getUserConfig(chatId).workDir, filePath);
   if (!fs.existsSync(resolved)) { await sendDocument(chatId, filePath, caption); return; }
   const res = await tgUpload('sendPhoto', chatId, 'photo', resolved, caption);
   if (!res.ok) await sendDocument(chatId, filePath, caption);
 }
 
 async function sendVideo(chatId, filePath, caption = '') {
-  const resolved = path.resolve(config.workDir, filePath);
+  const resolved = path.resolve(getUserConfig(chatId).workDir, filePath);
   if (!fs.existsSync(resolved)) { await sendDocument(chatId, filePath, caption); return; }
   const res = await tgUpload('sendVideo', chatId, 'video', resolved, caption);
   if (!res.ok) await sendDocument(chatId, filePath, caption);
 }
 
 async function sendAudio(chatId, filePath, caption = '') {
-  const resolved = path.resolve(config.workDir, filePath);
+  const resolved = path.resolve(getUserConfig(chatId).workDir, filePath);
   if (!fs.existsSync(resolved)) { await sendDocument(chatId, filePath, caption); return; }
   const res = await tgUpload('sendAudio', chatId, 'audio', resolved, caption);
   if (!res.ok) await sendDocument(chatId, filePath, caption);
@@ -598,24 +726,27 @@ const persistentKeyboard = { reply_markup: { keyboard: [
   [{ text: '⛔ Стоп' }, { text: '📓 NB' }],
 ], resize_keyboard: true, is_persistent: true }};
 
-function mainMenu() { return { reply_markup: { inline_keyboard: [
+function mainMenu(chatId) { const uc = chatId ? getUserConfig(chatId) : defaultUserConfig; const admin = chatId ? isAdmin(chatId) : false; const rows = [
   [{ text: '⚙️ Настройки', callback_data: 'settings' }, { text: '📊 Статус', callback_data: 'status' }],
-  [{ text: '📡 Каналы', callback_data: 'channels' }, { text: '📓 NotebookLM', callback_data: 'nb_menu' }],
-  [{ text: '📌 Шаблоны', callback_data: 'templates' }, { text: '📈 Статистика', callback_data: 'stats' }],
-  [{ text: `🤖 Агент: ${config.agentMode !== false ? '✅' : '❌'}`, callback_data: 'toggle_agent' }, { text: '❓ Помощь', callback_data: 'help' }],
-  [{ text: '🗑 Очистить историю', callback_data: 'clear' }]
-]}}; }
+]; if (admin) rows.push([{ text: '📡 Каналы', callback_data: 'channels' }]); rows.push(
+  [{ text: '📓 NotebookLM', callback_data: 'nb_menu' }, { text: '🔗 Интеграции', callback_data: 'integrations' }],
+  [{ text: '⚡ Навыки', callback_data: 'skills_menu' }, ...(admin ? [{ text: '📈 Статистика', callback_data: 'stats' }] : [])],
+  [{ text: `🤖 Агент: ${uc.agentMode !== false ? '✅' : '❌'}`, callback_data: 'toggle_agent' }, { text: '❓ Помощь', callback_data: 'help' }],
+  [{ text: '🗑 Очистить историю', callback_data: 'clear' }],
+); if (admin) rows.push([{ text: '👥 Пользователи', callback_data: 'users_panel' }]); return { reply_markup: { inline_keyboard: rows }}; }
 
 
-function settingsMenu() { return { reply_markup: { inline_keyboard: [
-  [{ text: `🤖 Модель: ${config.model}`, callback_data: 'set_model' }],
-  [{ text: `📁 ${config.workDir}`, callback_data: 'set_dir' }],
-  [{ text: `⏱ Таймаут: ${config.timeout}с`, callback_data: 'set_timeout' }],
-  [{ text: `💬 Системный промпт: ${config.systemPrompt ? '✅' : '❌'}`, callback_data: 'set_system' }],
-  [{ text: `🧠 Авто-модель: ${config.autoModel ? '✅' : '❌'}`, callback_data: 'toggle_auto' }],
-  [{ text: `📡 Стриминг: ${config.streaming ? '✅' : '❌'}`, callback_data: 'toggle_stream' }],
-  [{ text: '◀️ Назад', callback_data: 'back' }]
-]}}; }
+function settingsMenu(chatId) { const uc = chatId ? getUserConfig(chatId) : defaultUserConfig; const admin = chatId ? isAdmin(chatId) : false; const rows = [
+  [{ text: `🤖 Модель: ${uc.model}`, callback_data: 'set_model' }],
+]; if (admin) rows.push([{ text: `📁 ${uc.workDir}`, callback_data: 'set_dir' }]); rows.push(
+  [{ text: `⏱ Таймаут: ${uc.timeout}с`, callback_data: 'set_timeout' }],
+  [{ text: `💬 Системный промпт: ${uc.systemPrompt ? '✅' : '❌'}`, callback_data: 'set_system' }],
+  [{ text: `🧠 Авто-модель: ${uc.autoModel ? '✅' : '❌'}`, callback_data: 'toggle_auto' }],
+  [{ text: `📡 Стриминг: ${uc.streaming ? '✅' : '❌'}`, callback_data: 'toggle_stream' }],
+  [{ text: `👥 Мульти-агент: ${uc.multiAgent !== false ? '✅' : '❌'}`, callback_data: 'toggle_multi' }],
+  [{ text: `🔢 Макс шагов: ${uc.agentMaxSteps || 10}`, callback_data: 'set_max_steps' }],
+  [{ text: '◀️ Назад', callback_data: 'back' }],
+); return { reply_markup: { inline_keyboard: rows }}; }
 
 function modelMenu() { return { reply_markup: { inline_keyboard: [
   [{ text: '🟣 Anthropic (Claude)', callback_data: 'modelgrp_anthropic' }, { text: '🟢 OpenAI (GPT)', callback_data: 'modelgrp_openai' }],
@@ -623,16 +754,17 @@ function modelMenu() { return { reply_markup: { inline_keyboard: [
   [{ text: '◀️ Назад', callback_data: 'settings' }]
 ]}}; }
 
-function modelProviderMenu(provider) {
+function modelProviderMenu(provider, chatId) {
+  const uc = chatId ? getUserConfig(chatId) : defaultUserConfig;
   const models = PROVIDER_MODELS[provider] || [];
   return { reply_markup: { inline_keyboard: [
-    ...models.map(m => [{ text: (m.id === config.model ? '✅ ' : '') + m.label, callback_data: `model_${m.id}` }]),
+    ...models.map(m => [{ text: (m.id === uc.model ? '✅ ' : '') + m.label, callback_data: `model_${m.id}` }]),
     [{ text: '◀️ Назад к провайдерам', callback_data: 'set_model' }]
   ]}};
 }
 
-function timeoutMenu() { return { reply_markup: { inline_keyboard: [
-  ...[120, 300, 600].map(t => [{ text: (t === config.timeout ? '✅ ' : '') + t + 'с', callback_data: `timeout_${t}` }]),
+function timeoutMenu(chatId) { const uc = chatId ? getUserConfig(chatId) : defaultUserConfig; return { reply_markup: { inline_keyboard: [
+  ...[120, 300, 600].map(t => [{ text: (t === uc.timeout ? '✅ ' : '') + t + 'с', callback_data: `timeout_${t}` }]),
   [{ text: '◀️ Назад', callback_data: 'settings' }]
 ]}}; }
 
@@ -661,8 +793,12 @@ let waitingNbRename = new Map(); // chatId -> notebookId
 let waitingNbResearch = new Set();
 let waitingNbReportCustom = new Map(); // chatId -> notebookId
 let waitingNbAudioFocus = new Map(); // chatId -> {nbId, format}
-let waitingTemplateName = new Set(); // chatId -> ожидание имени шаблона
-let waitingTemplatePrompt = new Map(); // chatId -> templateName
+let waitingSkillName = new Set(); // chatId -> ожидание имени навыка
+let waitingSkillPrompt = new Map(); // chatId -> skillName or {name, category}
+let waitingSkillEditName = new Map(); // chatId -> skill index
+let waitingSkillEditPrompt = new Map(); // chatId -> skill index
+let waitingSkillEditDesc = new Map(); // chatId -> skill index
+let waitingSkillCategory = new Map(); // chatId -> skillName (for wizard)
 let offset = 0;
 let polling = false;
 let monitorTimer = null;
@@ -799,7 +935,8 @@ ${post.text}
 
 Обработай пост согласно инструкции. Если пост не подходит под критерии — ответь ТОЛЬКО словом "SKIP" и ничего больше. Если подходит — верни обработанный текст в нужном формате.`;
 
-  callAI(config.model, [{ role: 'user', content: input }])
+  const adminModel = adminIds[0] ? getUserConfig(adminIds[0]).model : 'gemini-2.5-flash';
+  callAI(adminModel, [{ role: 'user', content: input }])
     .then(result => {
       const text = result.text.trim();
       if (!text || text === 'SKIP') callback(null);
@@ -836,7 +973,8 @@ async function processSmartSetup(chatId, description) {
 - Ответь ТОЛЬКО JSON, без объяснений`;
 
   try {
-    const result = await callAI(config.model, [{ role: 'user', content: input }]);
+    const uc = getUserConfig(chatId);
+    const result = await callAI(uc.model, [{ role: 'user', content: input }]);
     const stdout = result.text;
 
     // Извлекаем JSON из ответа
@@ -1050,14 +1188,14 @@ async function handleNewMessage(event) {
     if (ch.prompt) {
       processPostWithClaude(post, ch, (processed) => {
         if (!processed) return; // Claude сказал SKIP
-        for (const uid of allowedIds) {
+        for (const uid of adminIds) {
           send(uid, `📡 @${username} #${post.id}\n\n${processed}\n\n🔗 https://t.me/${username}/${post.id}`);
         }
         console.log(`📡 RT+AI @${username}: пост #${msg.id}`);
       });
     } else {
       // Без инструкции — отправляем как есть
-      for (const uid of allowedIds) {
+      for (const uid of adminIds) {
         send(uid, formatPost(username, post));
       }
       console.log(`📡 RT @${username}: пост #${msg.id}`);
@@ -1121,12 +1259,12 @@ async function checkChannelFallback(idx) {
       if (ch.prompt) {
         processPostWithClaude(post, ch, (processed) => {
           if (!processed) return;
-          for (const uid of allowedIds) {
+          for (const uid of adminIds) {
             send(uid, `📡 @${ch.username} #${post.id}\n\n${processed}\n\n🔗 https://t.me/${ch.username}/${post.id}`);
           }
         });
       } else {
-        for (const uid of allowedIds) { send(uid, formatPost(ch.username, post)); }
+        for (const uid of adminIds) { send(uid, formatPost(ch.username, post)); }
       }
     }
     console.log(`📡 @${ch.username}: ${matched.length} новых`);
@@ -1157,7 +1295,7 @@ async function checkChannelNow(idx) {
     saveConfig();
   }
   if (matched.length > 0) {
-    for (const uid of allowedIds) {
+    for (const uid of adminIds) {
       for (const post of matched) { send(uid, formatPost(ch.username, post)); }
     }
   }
@@ -1239,44 +1377,363 @@ async function handleCallback(cb) {
   const msgId = cb.message.message_id;
   const data = cb.data;
   if (!data) return;
+  const uc = getUserConfig(chatId);
 
-  if (data === 'settings') editText(chatId, msgId, '⚙️ Настройки:', settingsMenu());
+  // Гейтинг: admin-only callbacks
+  const adminOnlyCallbacks = ['channels', 'ch_add', 'ch_interval', 'ch_smart', 'ch_mtproto', 'set_dir', 'stats', 'users_panel'];
+  const isAdminOnly = adminOnlyCallbacks.includes(data) || data.startsWith('ch_') || data.startsWith('user_');
+  if (isAdminOnly && !isAdmin(chatId)) {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: '❌ Только для администраторов', show_alert: true });
+    return;
+  }
+
+  if (data === 'settings') editText(chatId, msgId, '⚙️ Настройки:', settingsMenu(chatId));
   else if (data === 'status') {
     const busy = activeTasks.has(chatId);
     const histLen = (chatHistory.get(chatId) || []).length;
     const queueLen = getQueueSize(chatId);
-    const sysPrompt = config.systemPrompt ? `\n💬 Системный промпт: ${config.systemPrompt.slice(0, 50)}${config.systemPrompt.length > 50 ? '...' : ''}` : '';
-    editText(chatId, msgId, `📊 Статус\n\n🤖 Модель: ${config.model}\n📁 Папка: ${config.workDir}\n⏱ Таймаут: ${config.timeout}с\n🔄 Задача: ${busy ? 'Да' : 'Нет'}\n📬 Очередь: ${queueLen}\n💬 История: ${histLen} сообщений${sysPrompt}`, mainMenu());
+    const sysPrompt = uc.systemPrompt ? `\n💬 Системный промпт: ${uc.systemPrompt.slice(0, 50)}${uc.systemPrompt.length > 50 ? '...' : ''}` : '';
+    editText(chatId, msgId, `📊 Статус\n\n🤖 Модель: ${uc.model}\n📁 Папка: ${uc.workDir}\n⏱ Таймаут: ${uc.timeout}с\n🔄 Задача: ${busy ? 'Да' : 'Нет'}\n📬 Очередь: ${queueLen}\n💬 История: ${histLen} сообщений${sysPrompt}`, mainMenu(chatId));
   }
-  else if (data === 'clear') { stopTask(chatId); clearHistory(chatId); messageQueue.delete(chatId); editText(chatId, msgId, '🗑 История, очередь и задачи очищены', mainMenu()); }
-  else if (data === 'help') editText(chatId, msgId, helpText(), mainMenu());
-  else if (data === 'set_model') editText(chatId, msgId, `🤖 Текущая модель: ${config.model}\n\nВыберите провайдер:`, modelMenu());
+  else if (data === 'clear') { stopTask(chatId); clearHistory(chatId); messageQueue.delete(chatId); editText(chatId, msgId, '🗑 История, очередь и задачи очищены', mainMenu(chatId)); }
+  else if (data === 'help') editText(chatId, msgId, helpText(), mainMenu(chatId));
+  else if (data === 'set_model') editText(chatId, msgId, `🤖 Текущая модель: ${uc.model}\n\nВыберите провайдер:`, modelMenu());
   else if (data.startsWith('modelgrp_')) {
     const provider = data.slice(9);
     const label = PROVIDER_LABELS[provider] || provider;
-    editText(chatId, msgId, `${label} — выберите модель:`, modelProviderMenu(provider));
+    editText(chatId, msgId, `${label} — выберите модель:`, modelProviderMenu(provider, chatId));
   }
-  else if (data.startsWith('model_')) { config.model = data.slice(6); saveConfig(); editText(chatId, msgId, `✅ Модель: ${config.model} (${PROVIDER_LABELS[getProvider(config.model)] || ''})`, settingsMenu()); }
-  else if (data === 'set_timeout') editText(chatId, msgId, '⏱ Таймаут:', timeoutMenu());
-  else if (data.startsWith('timeout_')) { config.timeout = parseInt(data.slice(8)); saveConfig(); editText(chatId, msgId, `✅ Таймаут: ${config.timeout}с`, settingsMenu()); }
-  else if (data === 'set_dir') { editText(chatId, msgId, `📁 Папка: ${config.workDir}\n\nОтправьте путь:`, { reply_markup: { inline_keyboard: [[{ text: '◀️ Отмена', callback_data: 'settings' }]] } }); waitingDir.add(chatId); }
+  else if (data.startsWith('model_')) { uc.model = data.slice(6); saveUserConfig(chatId); editText(chatId, msgId, `✅ Модель: ${uc.model} (${PROVIDER_LABELS[getProvider(uc.model)] || ''})`, settingsMenu(chatId)); }
+  else if (data === 'set_timeout') editText(chatId, msgId, '⏱ Таймаут:', timeoutMenu(chatId));
+  else if (data.startsWith('timeout_')) { uc.timeout = parseInt(data.slice(8)); saveUserConfig(chatId); editText(chatId, msgId, `✅ Таймаут: ${uc.timeout}с`, settingsMenu(chatId)); }
+  else if (data === 'set_dir') { editText(chatId, msgId, `📁 Папка: ${uc.workDir}\n\nОтправьте путь:`, { reply_markup: { inline_keyboard: [[{ text: '◀️ Отмена', callback_data: 'settings' }]] } }); waitingDir.add(chatId); }
   else if (data === 'set_system') {
-    const current = config.systemPrompt ? `Текущий: ${config.systemPrompt}` : 'Не задан';
+    const current = uc.systemPrompt ? `Текущий: ${uc.systemPrompt}` : 'Не задан';
     editText(chatId, msgId, `💬 Системный промпт\n\n${current}\n\nОтправьте новый промпт или /clear_system для сброса:`, { reply_markup: { inline_keyboard: [
       [{ text: '🗑 Сбросить', callback_data: 'clear_system' }],
       [{ text: '◀️ Назад', callback_data: 'settings' }]
     ] } });
     waitingSystemPrompt.add(chatId);
   }
-  else if (data === 'clear_system') { config.systemPrompt = ''; saveConfig(); editText(chatId, msgId, '✅ Системный промпт сброшен', settingsMenu()); waitingSystemPrompt.delete(chatId); }
-  else if (data === 'toggle_auto') { config.autoModel = !config.autoModel; saveConfig(); editText(chatId, msgId, `🧠 Авто-модель: ${config.autoModel ? '✅ Включена' : '❌ Выключена'}`, settingsMenu()); }
-  else if (data === 'toggle_stream') { config.streaming = !config.streaming; saveConfig(); editText(chatId, msgId, `📡 Стриминг: ${config.streaming ? '✅ Включён — текст появляется порциями' : '❌ Выключен — ожидание полного ответа'}`, settingsMenu()); }
-  else if (data === 'toggle_agent') { config.agentMode = config.agentMode === false ? true : false; saveConfig(); editText(chatId, msgId, `🤖 Агент-режим: ${config.agentMode ? '✅ Включён — бот сам выполняет действия' : '❌ Выключен — только текстовые ответы'}`, mainMenu()); }
+  else if (data === 'clear_system') { uc.systemPrompt = ''; saveUserConfig(chatId); editText(chatId, msgId, '✅ Системный промпт сброшен', settingsMenu(chatId)); waitingSystemPrompt.delete(chatId); }
+  else if (data === 'toggle_auto') { uc.autoModel = !uc.autoModel; saveUserConfig(chatId); editText(chatId, msgId, `🧠 Авто-модель: ${uc.autoModel ? '✅ Включена' : '❌ Выключена'}`, settingsMenu(chatId)); }
+  else if (data === 'toggle_stream') { uc.streaming = !uc.streaming; saveUserConfig(chatId); editText(chatId, msgId, `📡 Стриминг: ${uc.streaming ? '✅ Включён — текст появляется порциями' : '❌ Выключен — ожидание полного ответа'}`, settingsMenu(chatId)); }
+  else if (data === 'toggle_agent') { uc.agentMode = uc.agentMode === false ? true : false; saveUserConfig(chatId); editText(chatId, msgId, `🤖 Агент-режим: ${uc.agentMode ? '✅ Включён — бот сам выполняет действия' : '❌ Выключен — только текстовые ответы'}`, mainMenu(chatId)); }
+  else if (data === 'toggle_multi') { uc.multiAgent = uc.multiAgent === false ? true : false; saveUserConfig(chatId); editText(chatId, msgId, `👥 Мульти-агент: ${uc.multiAgent !== false ? '✅ Включён — агент создаёт субагентов для сложных задач' : '❌ Выключен — один агент'}`, settingsMenu(chatId)); }
+  else if (data === 'set_max_steps') {
+    editText(chatId, msgId, `🔢 Максимум шагов агента (сейчас: ${uc.agentMaxSteps || 10}):`, { reply_markup: { inline_keyboard: [
+      ...[5, 10, 15, 20].map(n => [{ text: (n === (uc.agentMaxSteps || 10) ? '✅ ' : '') + n, callback_data: `maxsteps_${n}` }]),
+      [{ text: '◀️ Назад', callback_data: 'settings' }]
+    ] } });
+  }
+  else if (data.startsWith('maxsteps_')) { uc.agentMaxSteps = parseInt(data.slice(9)); saveUserConfig(chatId); editText(chatId, msgId, `✅ Макс шагов: ${uc.agentMaxSteps}`, settingsMenu(chatId)); }
   else if (data === 'set_lang') editText(chatId, msgId, '🌐 Язык ответов Claude:', langMenu());
-  else if (data === 'lang_ru') { config.systemPrompt = 'Всегда отвечай на русском языке.'; saveConfig(); editText(chatId, msgId, '✅ Язык: Русский', mainMenu()); }
-  else if (data === 'lang_en') { config.systemPrompt = 'Always respond in English.'; saveConfig(); editText(chatId, msgId, '✅ Language: English', mainMenu()); }
-  else if (data === 'lang_clear') { config.systemPrompt = ''; saveConfig(); editText(chatId, msgId, '✅ Языковая настройка сброшена', mainMenu()); }
-  else if (data === 'back') editText(chatId, msgId, '👋 Claude Code Remote', mainMenu());
+  else if (data === 'lang_ru') { uc.systemPrompt = 'Всегда отвечай на русском языке.'; saveUserConfig(chatId); editText(chatId, msgId, '✅ Язык: Русский', mainMenu(chatId)); }
+  else if (data === 'lang_en') { uc.systemPrompt = 'Always respond in English.'; saveUserConfig(chatId); editText(chatId, msgId, '✅ Language: English', mainMenu(chatId)); }
+  else if (data === 'lang_clear') { uc.systemPrompt = ''; saveUserConfig(chatId); editText(chatId, msgId, '✅ Языковая настройка сброшена', mainMenu(chatId)); }
+  else if (data === 'back') editText(chatId, msgId, '👋 Claude Code Remote', mainMenu(chatId));
+
+  // === Навыки ===
+  else if (data === 'noop') {
+    // Пустой обработчик для разделителей/счётчиков
+    tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+  }
+  else if (data === 'skills_menu' || data.startsWith('skills_page_')) {
+    const skills = uc.skills || [];
+    const page = data.startsWith('skills_page_') ? parseInt(data.slice(12)) : 0;
+    const PAGE_SIZE = 5;
+    if (skills.length === 0) {
+      editText(chatId, msgId, '⚡ Навыки пусты\n\nСохраняйте часто используемые промпты:\n/skill <имя> <промпт>\n\nПримеры:\n• /skill review Сделай code review\n• /skill summary Дай краткое резюме\n\nИли отправьте .txt файл при создании', { reply_markup: { inline_keyboard: [
+        [{ text: '➕ Создать навык', callback_data: 'skill_create' }],
+        [{ text: '📦 Галерея пресетов', callback_data: 'skill_presets' }],
+        [{ text: '◀️ Назад', callback_data: 'back' }]
+      ] } });
+    } else {
+      // Группировка по категориям
+      const grouped = {};
+      skills.forEach((s, i) => {
+        const cat = s.category || 'other';
+        if (!grouped[cat]) grouped[cat] = [];
+        grouped[cat].push({ ...s, _idx: i });
+      });
+      const allItems = [];
+      for (const cat of SKILL_CATEGORIES) {
+        if (grouped[cat.id] && grouped[cat.id].length > 0) {
+          allItems.push({ type: 'separator', label: cat.label });
+          allItems.push(...grouped[cat.id].map(s => ({ type: 'skill', ...s })));
+        }
+      }
+      const totalPages = Math.ceil(allItems.length / PAGE_SIZE);
+      const pageItems = allItems.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+      const rows = [];
+      for (const item of pageItems) {
+        if (item.type === 'separator') {
+          rows.push([{ text: `── ${item.label} ──`, callback_data: 'noop' }]);
+        } else {
+          const useBadge = item.uses > 0 ? ` (${item.uses})` : '';
+          rows.push([
+            { text: `⚡ ${item.name}${useBadge}`, callback_data: `skill_run_${item._idx}` },
+            { text: 'ℹ️', callback_data: `skill_info_${item._idx}` },
+            { text: '🗑', callback_data: `skill_del_${item._idx}` },
+          ]);
+        }
+      }
+      // Пагинация
+      if (totalPages > 1) {
+        const nav = [];
+        if (page > 0) nav.push({ text: '◀️', callback_data: `skills_page_${page - 1}` });
+        nav.push({ text: `${page + 1}/${totalPages}`, callback_data: 'noop' });
+        if (page < totalPages - 1) nav.push({ text: '▶️', callback_data: `skills_page_${page + 1}` });
+        rows.push(nav);
+      }
+      rows.push([{ text: '➕ Создать', callback_data: 'skill_create' }, { text: '📦 Галерея пресетов', callback_data: 'skill_presets' }]);
+      rows.push([{ text: '◀️ Назад', callback_data: 'back' }]);
+      editText(chatId, msgId, `⚡ Навыки (${skills.length}):`, { reply_markup: { inline_keyboard: rows } });
+    }
+  }
+  else if (data === 'skill_create') {
+    editText(chatId, msgId, '⚡ Введите имя навыка:', { reply_markup: { inline_keyboard: [[{ text: '◀️ Отмена', callback_data: 'skills_menu' }]] } });
+    waitingSkillName.add(chatId);
+  }
+  else if (data.startsWith('skill_run_')) {
+    const idx = parseInt(data.slice(10));
+    const skill = (uc.skills || [])[idx];
+    if (skill) {
+      skill.uses = (skill.uses || 0) + 1;
+      skill.lastUsed = Date.now();
+      saveUserConfig(chatId);
+      editText(chatId, msgId, `⚡ Запускаю: ${skill.name}`);
+      runClaude(chatId, skill.prompt);
+    }
+  }
+  else if (data.startsWith('skill_info_')) {
+    const idx = parseInt(data.slice(11));
+    const skill = (uc.skills || [])[idx];
+    if (skill) {
+      const catLabel = (SKILL_CATEGORIES.find(c => c.id === skill.category) || {}).label || '📦 Другое';
+      const lastUsedStr = skill.lastUsed ? new Date(skill.lastUsed).toLocaleString('ru-RU') : 'никогда';
+      const promptPreview = skill.prompt.length > 300 ? skill.prompt.slice(0, 300) + '...' : skill.prompt;
+      const desc = skill.description ? `\n📝 ${skill.description}` : '';
+      editText(chatId, msgId,
+        `⚡ ${skill.name}${desc}\n\n📂 Категория: ${catLabel}\n📊 Использований: ${skill.uses || 0}\n🕐 Последний запуск: ${lastUsedStr}\n\n📄 Промпт:\n${promptPreview}`,
+        { reply_markup: { inline_keyboard: [
+          [{ text: '▶️ Запуск', callback_data: `skill_run_${idx}` }, { text: '✏️ Редактировать', callback_data: `skill_edit_${idx}` }],
+          [{ text: '🗑 Удалить', callback_data: `skill_del_${idx}` }, { text: '◀️ Назад', callback_data: 'skills_menu' }],
+        ] } }
+      );
+    }
+  }
+  else if (data.startsWith('skill_edit_')) {
+    const idx = parseInt(data.slice(11));
+    const skill = (uc.skills || [])[idx];
+    if (skill) {
+      editText(chatId, msgId, `✏️ Редактирование: ${skill.name}\n\nВыберите что изменить:`, { reply_markup: { inline_keyboard: [
+        [{ text: '📝 Имя', callback_data: `skedit_name_${idx}` }, { text: '📄 Промпт', callback_data: `skedit_prompt_${idx}` }],
+        [{ text: '📝 Описание', callback_data: `skedit_desc_${idx}` }, { text: '📂 Категория', callback_data: `skedit_cat_${idx}` }],
+        [{ text: '◀️ Назад', callback_data: `skill_info_${idx}` }],
+      ] } });
+    }
+  }
+  else if (data.startsWith('skedit_name_')) {
+    const idx = parseInt(data.slice(12));
+    waitingSkillEditName.set(chatId, idx);
+    editText(chatId, msgId, '📝 Введите новое имя навыка:', { reply_markup: { inline_keyboard: [[{ text: '◀️ Отмена', callback_data: `skill_info_${idx}` }]] } });
+  }
+  else if (data.startsWith('skedit_prompt_')) {
+    const idx = parseInt(data.slice(14));
+    waitingSkillEditPrompt.set(chatId, idx);
+    editText(chatId, msgId, '📄 Введите новый промпт (или отправьте .txt файл):', { reply_markup: { inline_keyboard: [[{ text: '◀️ Отмена', callback_data: `skill_info_${idx}` }]] } });
+  }
+  else if (data.startsWith('skedit_desc_')) {
+    const idx = parseInt(data.slice(12));
+    waitingSkillEditDesc.set(chatId, idx);
+    editText(chatId, msgId, '📝 Введите описание навыка:', { reply_markup: { inline_keyboard: [[{ text: '◀️ Отмена', callback_data: `skill_info_${idx}` }]] } });
+  }
+  else if (data.startsWith('skedit_cat_')) {
+    const idx = parseInt(data.slice(11));
+    const rows = SKILL_CATEGORIES.map(c => [{ text: c.label, callback_data: `skcat_${idx}_${c.id}` }]);
+    rows.push([{ text: '◀️ Отмена', callback_data: `skill_info_${idx}` }]);
+    editText(chatId, msgId, '📂 Выберите категорию:', { reply_markup: { inline_keyboard: rows } });
+  }
+  else if (data.startsWith('skcat_')) {
+    const parts = data.slice(6).split('_');
+    const idx = parseInt(parts[0]);
+    const catId = parts.slice(1).join('_');
+    const skill = (uc.skills || [])[idx];
+    if (skill) {
+      skill.category = catId;
+      saveUserConfig(chatId);
+      const catLabel = (SKILL_CATEGORIES.find(c => c.id === catId) || {}).label || catId;
+      editText(chatId, msgId, `✅ Категория "${skill.name}" → ${catLabel}`, { reply_markup: { inline_keyboard: [[{ text: '◀️ К навыку', callback_data: `skill_info_${idx}` }]] } });
+    }
+  }
+  else if (data.startsWith('skill_del_')) {
+    const idx = parseInt(data.slice(10));
+    if (uc.skills && uc.skills[idx]) {
+      const name = uc.skills[idx].name;
+      uc.skills.splice(idx, 1);
+      saveUserConfig(chatId);
+      editText(chatId, msgId, `🗑 Навык "${name}" удалён`, mainMenu(chatId));
+    }
+  }
+  // === Галерея пресетов ===
+  else if (data === 'skill_presets') {
+    const rows = PRESET_SKILLS.map((p, i) => {
+      const catLabel = (SKILL_CATEGORIES.find(c => c.id === p.category) || {}).label || '📦';
+      return [{ text: `${catLabel} ${p.name} — ${p.description}`, callback_data: `add_preset_${i}` }];
+    });
+    rows.push([{ text: '◀️ Назад', callback_data: 'skills_menu' }]);
+    editText(chatId, msgId, '📦 Галерея пресетов\n\nВыберите навык для добавления:', { reply_markup: { inline_keyboard: rows } });
+  }
+  else if (data.startsWith('add_preset_')) {
+    const idx = parseInt(data.slice(11));
+    const preset = PRESET_SKILLS[idx];
+    if (preset) {
+      if (!uc.skills) uc.skills = [];
+      const exists = uc.skills.find(s => s.name.toLowerCase() === preset.name.toLowerCase());
+      if (exists) {
+        editText(chatId, msgId, `⚠️ Навык "${preset.name}" уже существует`, { reply_markup: { inline_keyboard: [[{ text: '◀️ Назад', callback_data: 'skill_presets' }]] } });
+      } else {
+        uc.skills.push({ name: preset.name, prompt: preset.prompt, description: preset.description, category: preset.category, uses: 0, lastUsed: null });
+        saveUserConfig(chatId);
+        editText(chatId, msgId, `✅ Навык "${preset.name}" добавлен из галереи`, { reply_markup: { inline_keyboard: [[{ text: '◀️ К навыкам', callback_data: 'skills_menu' }, { text: '📦 Ещё', callback_data: 'skill_presets' }]] } });
+      }
+    }
+  }
+  // Wizard создания навыка — выбор категории
+  else if (data.startsWith('newskill_cat_')) {
+    const catId = data.slice(13);
+    const skillName = waitingSkillCategory.get(chatId);
+    waitingSkillCategory.delete(chatId);
+    if (skillName) {
+      waitingSkillPrompt.set(chatId, { name: skillName, category: catId });
+      editText(chatId, msgId, `⚡ Имя: ${skillName}\n📂 Категория: ${(SKILL_CATEGORIES.find(c => c.id === catId) || {}).label || catId}\n\nТеперь введите промпт для навыка:\nИли отправьте .txt файл`, { reply_markup: { inline_keyboard: [[{ text: '◀️ Отмена', callback_data: 'skills_menu' }]] } });
+    }
+  }
+  // Fallback для старых кнопок шаблонов
+  else if (data === 'templates' || data.startsWith('tpl_')) {
+    editText(chatId, msgId, '⚡ Шаблоны переименованы в Навыки!', mainMenu(chatId));
+  }
+
+  // === Интеграции (MCP / Rube) ===
+  else if (data === 'integrations') {
+    // Динамическое содержимое — читаем реальные MCP серверы
+    let mcpInfo = '';
+    let mcpServers = [];
+    try {
+      const settingsPath = path.join(process.env.HOME || '/Users/guest1', '.claude', 'settings.json');
+      if (fs.existsSync(settingsPath)) {
+        const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+        const servers = settings.mcpServers || {};
+        mcpServers = Object.keys(servers);
+        if (mcpServers.length > 0) {
+          mcpInfo = `\n\n🟢 Подключённые MCP серверы (${mcpServers.length}):\n`;
+          mcpServers.forEach(name => {
+            const srv = servers[name];
+            const cmd = srv.command || '';
+            mcpInfo += `• ${name} (${cmd})\n`;
+          });
+        } else {
+          mcpInfo = '\n\n🔴 MCP серверы не настроены';
+        }
+      } else {
+        mcpInfo = '\n\n⚠️ Файл настроек Claude не найден';
+      }
+    } catch(e) {
+      mcpInfo = '\n\n⚠️ Ошибка чтения настроек';
+    }
+    const rows = [
+      [{ text: '🔍 Проверить подключение', callback_data: 'integ_test' }],
+      [{ text: '🌐 Маркетплейс Rube', url: 'https://rube.app/marketplace' }],
+      [{ text: '◀️ Назад', callback_data: 'back' }],
+    ];
+    editText(chatId, msgId, `🔗 Интеграции (MCP)${mcpInfo}\n\n📋 Как подключить:\n1. Настройте MCP серверы в ~/.claude/settings.json\n2. Или подключите через rube.app\n3. AI автоматически использует интеграции`, { reply_markup: { inline_keyboard: rows } });
+  }
+  else if (data === 'integ_test') {
+    // Проверка подключения MCP серверов
+    let result = '🔍 Проверка MCP серверов...\n\n';
+    try {
+      const settingsPath = path.join(process.env.HOME || '/Users/guest1', '.claude', 'settings.json');
+      if (fs.existsSync(settingsPath)) {
+        const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+        const servers = settings.mcpServers || {};
+        const names = Object.keys(servers);
+        if (names.length === 0) {
+          result += '❌ Нет настроенных серверов';
+        } else {
+          for (const name of names) {
+            const srv = servers[name];
+            const cmd = srv.command || '';
+            let exists = false;
+            try { execSync(`which ${cmd.split(' ')[0]} 2>/dev/null`, { encoding: 'utf8' }); exists = true; } catch(e) {}
+            result += `${exists ? '✅' : '⚠️'} ${name} — ${cmd} ${exists ? '(найден)' : '(не найден в PATH)'}\n`;
+          }
+        }
+      } else {
+        result += '❌ ~/.claude/settings.json не найден';
+      }
+    } catch(e) {
+      result += `❌ Ошибка: ${e.message}`;
+    }
+    editText(chatId, msgId, result, { reply_markup: { inline_keyboard: [[{ text: '◀️ Назад', callback_data: 'integrations' }]] } });
+  }
+
+  // === Админ-панель: Пользователи ===
+  else if (data === 'users_panel') {
+    const allUsers = Array.from(userConfigs.entries());
+    let text = `👥 Пользователи (${allUsers.length})\n\n`;
+    allUsers.forEach(([uid, cfg], i) => {
+      const roleIcon = cfg.role === 'admin' ? '👑 admin' : '👤 user';
+      const bannedTag = cfg.banned ? ' 🚫' : '';
+      text += `${i + 1}. User ${uid} — ${roleIcon} — ${cfg.model}${bannedTag}\n`;
+    });
+    const rows = allUsers.filter(([uid]) => uid !== chatId).map(([uid]) => [{ text: `👤 ${uid}`, callback_data: `user_detail_${uid}` }]);
+    rows.push([{ text: '◀️ Назад', callback_data: 'back' }]);
+    editText(chatId, msgId, text, { reply_markup: { inline_keyboard: rows } });
+  }
+  else if (data.startsWith('user_detail_')) {
+    const targetId = Number(data.slice(12));
+    const tc = getUserConfig(targetId);
+    const roleIcon = tc.role === 'admin' ? '👑 admin' : '👤 user';
+    const bannedTag = tc.banned ? '🚫 Забанен' : '✅ Активен';
+    const info = `👤 User ${targetId}\n\nРоль: ${roleIcon}\nСтатус: ${bannedTag}\nМодель: ${tc.model}\nПапка: ${tc.workDir}\nАгент: ${tc.agentMode !== false ? '✅' : '❌'}\nСтриминг: ${tc.streaming ? '✅' : '❌'}`;
+    const rows = [];
+    if (tc.banned) rows.push([{ text: '✅ Разбан', callback_data: `user_unban_${targetId}` }]);
+    else rows.push([{ text: '🚫 Бан', callback_data: `user_ban_${targetId}` }]);
+    if (tc.role === 'admin') rows.push([{ text: '👤 Сделать юзером', callback_data: `user_role_${targetId}` }]);
+    else rows.push([{ text: '👑 Сделать админом', callback_data: `user_role_${targetId}` }]);
+    rows.push([{ text: '🗑 Очистить историю', callback_data: `user_clear_${targetId}` }]);
+    rows.push([{ text: '◀️ Назад к списку', callback_data: 'users_panel' }]);
+    editText(chatId, msgId, info, { reply_markup: { inline_keyboard: rows } });
+  }
+  else if (data.startsWith('user_ban_')) {
+    const targetId = Number(data.slice(9));
+    const tc = getUserConfig(targetId);
+    tc.banned = true;
+    saveUserConfig(targetId);
+    editText(chatId, msgId, `🚫 User ${targetId} забанен`, { reply_markup: { inline_keyboard: [[{ text: '◀️ Назад', callback_data: `user_detail_${targetId}` }]] } });
+  }
+  else if (data.startsWith('user_unban_')) {
+    const targetId = Number(data.slice(11));
+    const tc = getUserConfig(targetId);
+    tc.banned = false;
+    saveUserConfig(targetId);
+    editText(chatId, msgId, `✅ User ${targetId} разбанен`, { reply_markup: { inline_keyboard: [[{ text: '◀️ Назад', callback_data: `user_detail_${targetId}` }]] } });
+  }
+  else if (data.startsWith('user_role_')) {
+    const targetId = Number(data.slice(10));
+    const tc = getUserConfig(targetId);
+    tc.role = tc.role === 'admin' ? 'user' : 'admin';
+    if (tc.role === 'user') tc.workDir = '/tmp';
+    saveUserConfig(targetId);
+    const newRole = tc.role === 'admin' ? '👑 admin' : '👤 user';
+    editText(chatId, msgId, `✅ User ${targetId} → ${newRole}`, { reply_markup: { inline_keyboard: [[{ text: '◀️ Назад', callback_data: `user_detail_${targetId}` }]] } });
+  }
+  else if (data.startsWith('user_clear_')) {
+    const targetId = Number(data.slice(11));
+    clearHistory(targetId);
+    editText(chatId, msgId, `🗑 История User ${targetId} очищена`, { reply_markup: { inline_keyboard: [[{ text: '◀️ Назад', callback_data: `user_detail_${targetId}` }]] } });
+  }
 
   // === Каналы ===
   else if (data === 'channels') {
@@ -1545,7 +2002,7 @@ async function handleCallback(cb) {
   else if (data === 'qa_save') {
     const last = lastResponse.get(chatId);
     if (last) {
-      const filePath = path.join(config.workDir, `claude_${Date.now()}.txt`);
+      const filePath = path.join(uc.workDir, `claude_${Date.now()}.txt`);
       fs.writeFileSync(filePath, last.text);
       sendDocument(chatId, filePath, 'Сохранённый ответ Claude');
     } else send(chatId, '❌ Нет предыдущего ответа');
@@ -1556,48 +2013,11 @@ async function handleCallback(cb) {
     else send(chatId, '❌ Нет предыдущего запроса');
   }
 
-  // === Шаблоны ===
-  else if (data === 'templates') {
-    const tpls = config.templates || [];
-    if (tpls.length === 0) {
-      editText(chatId, msgId, '📌 Шаблоны пусты\n\nСохраняйте часто используемые промпты:\n/save <имя> <промпт>\n\nПримеры:\n• /save review Сделай code review\n• /save summary Дай краткое резюме', { reply_markup: { inline_keyboard: [
-        [{ text: '➕ Создать шаблон', callback_data: 'tpl_create' }],
-        [{ text: '◀️ Назад', callback_data: 'back' }]
-      ] } });
-    } else {
-      const rows = tpls.map((t, i) => [{ text: `📌 ${t.name}`, callback_data: `tpl_run_${i}` }, { text: '🗑', callback_data: `tpl_del_${i}` }]);
-      rows.push([{ text: '➕ Создать', callback_data: 'tpl_create' }]);
-      rows.push([{ text: '◀️ Назад', callback_data: 'back' }]);
-      editText(chatId, msgId, `📌 Шаблоны (${tpls.length}):`, { reply_markup: { inline_keyboard: rows } });
-    }
-  }
-  else if (data === 'tpl_create') {
-    editText(chatId, msgId, '📌 Введите имя шаблона:', { reply_markup: { inline_keyboard: [[{ text: '◀️ Отмена', callback_data: 'templates' }]] } });
-    waitingTemplateName.add(chatId);
-  }
-  else if (data.startsWith('tpl_run_')) {
-    const idx = parseInt(data.slice(8));
-    const tpl = (config.templates || [])[idx];
-    if (tpl) {
-      editText(chatId, msgId, `📌 Запускаю: ${tpl.name}`);
-      runClaude(chatId, tpl.prompt);
-    }
-  }
-  else if (data.startsWith('tpl_del_')) {
-    const idx = parseInt(data.slice(8));
-    if (config.templates && config.templates[idx]) {
-      const name = config.templates[idx].name;
-      config.templates.splice(idx, 1);
-      saveConfig();
-      editText(chatId, msgId, `🗑 Шаблон "${name}" удалён`, mainMenu());
-    }
-  }
-
   // === Статистика ===
   else if (data === 'stats') {
     const uptime = Math.round((Date.now() - stats.startTime) / 60000);
     const avgTime = stats.claudeCalls > 0 ? (stats.totalResponseTime / stats.claudeCalls / 1000).toFixed(1) : 0;
-    editText(chatId, msgId, `📈 Статистика\n\n⏱ Аптайм: ${uptime} мин\n📨 Сообщений: ${stats.messages}\n🤖 Claude вызовов: ${stats.claudeCalls}\n⚡ Среднее время ответа: ${avgTime}с\n🎙 Голосовых: ${stats.voiceMessages}\n📎 Файлов: ${stats.files}\n❌ Ошибок: ${stats.errors}\n🧠 AI активен: ${activeClaudeCount}/${MAX_CLAUDE_PROCS}\n🤖 Модель: ${config.model}`, mainMenu());
+    editText(chatId, msgId, `📈 Статистика\n\n⏱ Аптайм: ${uptime} мин\n📨 Сообщений: ${stats.messages}\n🤖 Claude вызовов: ${stats.claudeCalls}\n⚡ Среднее время ответа: ${avgTime}с\n🎙 Голосовых: ${stats.voiceMessages}\n📎 Файлов: ${stats.files}\n❌ Ошибок: ${stats.errors}\n🧠 AI активен: ${activeClaudeCount}/${MAX_CLAUDE_PROCS}\n🤖 Модель: ${uc.model}`, mainMenu(chatId));
   }
 
   tgApi('answerCallbackQuery', { callback_query_id: cb.id });
@@ -1623,7 +2043,7 @@ function runNbCommand(chatId, prompt, callback, opts = {}) {
   }
   const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'CLAUDECODE'));
   const child = spawn(CLAUDE_PATH, args, {
-    cwd: config.workDir,
+    cwd: getUserConfig(chatId).workDir,
     env: cleanEnv,
     stdio: ['pipe', 'pipe', 'pipe']
   });
@@ -1720,10 +2140,27 @@ ${Object.entries(PROVIDER_MODELS).map(([k, models]) => `• ${PROVIDER_LABELS[k]
 • /ps — процессы Claude
 • /web <запрос> — поиск в интернете
 
-📌 Шаблоны:
-• /save <имя> <промпт> — сохранить
-• /t <имя> — запустить шаблон
-• /templates — список шаблонов
+⚡ Навыки:
+• /skill <имя> <промпт> — сохранить навык
+• /skill edit <имя> — редактировать навык
+• /skill info <имя> — информация о навыке
+• /s <имя> — запустить навык
+• /skills — список с категориями
+• 📦 Галерея пресетов — готовые навыки
+• .txt файл при создании → содержимое станет промптом
+• Агент может вызывать навыки через [ACTION: skill]
+
+👥 Мульти-агенты:
+• /agents — статус и настройки
+• Агент создаёт субагентов (💻🔍🔎✍️⚡) для сложных задач
+• Субагенты общаются, делегируют, самокорректируются
+• Live-статус: мысли, действия, прогресс — в одном сообщении
+• Настройки → Мульти-агент / Макс шагов
+
+🔗 Интеграции:
+• AI использует подключённые MCP серверы автоматически
+• 🔍 Проверка подключения в меню интеграций
+• Настройка в ~/.claude/settings.json
 
 ⏰ Напоминания:
 • /remind 30 мин Текст — напомнить
@@ -1778,9 +2215,10 @@ function runBash(chatId, cmd) {
   if (!cmd.trim()) { send(chatId, '❌ Укажите команду: /bash ls -la'); return; }
   send(chatId, `⚡ Выполняю: ${cmd.slice(0, 100)}...`);
 
+  const uc = getUserConfig(chatId);
   const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'CLAUDECODE'));
   const child = spawn('bash', ['-c', cmd], {
-    cwd: config.workDir,
+    cwd: uc.workDir,
     env: cleanEnv,
     stdio: ['pipe', 'pipe', 'pipe']
   });
@@ -1806,8 +2244,9 @@ function runBash(chatId, cmd) {
 
 // === Git статус ===
 function runGit(chatId) {
+  const uc = getUserConfig(chatId);
   const child = spawn('bash', ['-c', 'echo "📁 $(pwd)" && echo "" && echo "=== git status ===" && git status -sb 2>&1 && echo "" && echo "=== git log (последние 5) ===" && git log --oneline -5 2>&1'], {
-    cwd: config.workDir,
+    cwd: uc.workDir,
     stdio: ['pipe', 'pipe', 'pipe']
   });
 
@@ -1859,7 +2298,8 @@ async function handleFile(chatId, msg) {
     return false;
   }
 
-  const destPath = path.join(config.workDir, fileName);
+  const uc = getUserConfig(chatId);
+  const destPath = path.join(uc.workDir, fileName);
   send(chatId, `📥 Скачиваю ${fileName}...`);
 
   const downloaded = await downloadTelegramFile(fileId, destPath);
@@ -1869,6 +2309,43 @@ async function handleFile(chatId, msg) {
   }
 
   send(chatId, `✅ Файл сохранён: ${destPath}`);
+
+  // Редактирование промпта навыка из .txt файла
+  if (waitingSkillEditPrompt.has(chatId) && msg.document && fileName.endsWith('.txt')) {
+    const idx = waitingSkillEditPrompt.get(chatId);
+    waitingSkillEditPrompt.delete(chatId);
+    try {
+      const fileContent = fs.readFileSync(destPath, 'utf8').trim();
+      if (!fileContent) { send(chatId, '❌ Файл пустой'); return true; }
+      if (uc.skills && uc.skills[idx]) {
+        uc.skills[idx].prompt = fileContent;
+        saveUserConfig(chatId);
+        send(chatId, `✅ Промпт "${uc.skills[idx].name}" обновлён из файла (${fileContent.length} символов)`, mainMenu(chatId));
+      }
+    } catch (e) {
+      send(chatId, `❌ Ошибка чтения файла: ${e.message}`);
+    }
+    return true;
+  }
+
+  // Создание навыка из .txt файла
+  if (waitingSkillPrompt.has(chatId) && msg.document && fileName.endsWith('.txt')) {
+    const pending = waitingSkillPrompt.get(chatId);
+    waitingSkillPrompt.delete(chatId);
+    const name = typeof pending === 'object' ? pending.name : pending;
+    const category = typeof pending === 'object' ? pending.category : 'other';
+    try {
+      const fileContent = fs.readFileSync(destPath, 'utf8').trim();
+      if (!fileContent) { send(chatId, '❌ Файл пустой'); return true; }
+      if (!uc.skills) uc.skills = [];
+      uc.skills.push({ name, prompt: fileContent, description: '', category, uses: 0, lastUsed: null });
+      saveUserConfig(chatId);
+      send(chatId, `✅ Навык "${name}" создан из файла (${fileContent.length} символов)`, mainMenu(chatId));
+    } catch (e) {
+      send(chatId, `❌ Ошибка чтения файла: ${e.message}`);
+    }
+    return true;
+  }
 
   const prompt = caption
     ? `Файл "${fileName}" сохранён в ${destPath}. ${caption}`
@@ -1912,10 +2389,11 @@ async function handleVoice(chatId, msg) {
   const voice = msg.voice || msg.audio;
   if (!voice) return false;
 
+  const uc = getUserConfig(chatId);
   const fileId = voice.file_id;
   const ext = msg.voice ? 'ogg' : (voice.mime_type || '').split('/')[1] || 'mp3';
   const fileName = `voice_${Date.now()}.${ext}`;
-  const destPath = path.join(config.workDir, fileName);
+  const destPath = path.join(uc.workDir, fileName);
 
   send(chatId, `🎙 Распознаю голосовое...`);
 
@@ -1982,37 +2460,60 @@ const AGENT_SYSTEM_PROMPT = `Ты — AI-ассистент с возможно�
 путь/к/файлу
 [/ACTION]
 
+[ACTION: skill]
+имя_навыка
+дополнительный контекст
+[/ACTION]
+
+[ACTION: delegate]
+роль: coder|researcher|reviewer|writer|executor
+задача: описание что нужно сделать
+контекст: дополнительная информация
+[/ACTION]
+
+[ACTION: think]
+Внутреннее размышление — анализ ситуации, планирование шагов.
+Пользователь видит что ты думаешь, но не видит содержимое.
+[/ACTION]
+
 ## Описание действий
 
-1. **bash** — выполнить bash-команду на сервере. Рабочая директория: ${config.workDir}. Тайм-аут: 30 секунд.
-2. **remind** — установить напоминание. Первая строка — минуты (число), вторая — текст.
-3. **file** — отправить файл пользователю. Одна строка — путь к файлу.
+1. **bash** — выполнить bash-команду. Тайм-аут: 30с.
+2. **remind** — напоминание. Строка 1: минуты, строка 2: текст.
+3. **file** — отправить файл. Одна строка — путь.
+4. **skill** — навык пользователя. Строка 1: имя, строка 2: контекст.
+5. **delegate** — делегировать субагенту. Формат: роль/задача/контекст.
+6. **think** — внутреннее размышление перед действием.
+
+## Роли субагентов (для delegate)
+- **coder** — 💻 пишет/модифицирует код
+- **researcher** — 🔍 исследует, анализирует, ищет информацию
+- **reviewer** — 🔎 проверяет качество, находит ошибки
+- **writer** — ✍️ создаёт тексты, документацию
+- **executor** — ⚡ выполняет системные команды
 
 ## Среда выполнения
 
 - macOS (Darwin), Node.js v25, Homebrew установлен
 - Python НЕ установлен. НЕ пытайся использовать python/pip/python3
-- Для создания файлов используй node -e или bash-команды (echo, cat с heredoc)
-- Для скачивания: curl
-- Для работы с JSON: node -e 'console.log(JSON.parse(...))'
-- Для работы с API: curl с JSON body
-- Gemini API доступен: ключ в $GEMINI_API_KEY
+- Для файлов: node -e или bash (echo, cat heredoc)
+- curl для скачивания, node -e для JSON, Gemini API в $GEMINI_API_KEY
 
 ## Правила
 
-- Когда пользователь просит что-то СДЕЛАТЬ — ДЕЛАЙ ЭТО через действия, не предлагай команды.
+- Когда просят СДЕЛАТЬ — ДЕЛАЙ через действия, не предлагай команды.
 - Одно действие за ответ. После результата решай, нужно ли следующее.
-- Если задача не требует действий (разговор, объяснение) — отвечай текстом БЕЗ блоков [ACTION].
-- Текст ДО блока [ACTION] — короткий статус (5-10 слов). Например: "Проверяю файлы на рабочем столе."
-- НЕ пиши длинных объяснений перед ACTION — только краткий статус.
-- НЕ показывай пользователю raw-код, HTML, CSS в сообщениях. Файлы создавай ТОЛЬКО через bash.
-- НИКОГДА не выводи содержимое файлов в текст ответа — сохраняй в файл и отправь через [ACTION: file].
-- Для bash: НЕ выполняй деструктивные команды (rm -rf /, форматирование дисков).
+- Текст ДО блока [ACTION] — краткий статус (5-15 слов). Пример: "Анализирую структуру проекта."
+- НЕ пиши длинных объяснений перед ACTION.
+- Для сложных задач используй [ACTION: think] чтобы спланировать, затем delegate субагентам.
+- Для простых задач действуй сам через bash/file/skill.
+- Если субагент вернул ошибку — попробуй исправить и делегировать снова.
+- НЕ показывай raw-код в сообщениях. Файлы — через bash.
+- Файлы отправляй через [ACTION: file], не дублируй содержимое.
+- НЕ делай деструктивных команд.
 - Отвечай на языке пользователя. Будь кратким.
-- Когда создаёшь файл, в финальном ответе укажи путь и краткое описание. НЕ дублируй содержимое.
-- Если задача выполнена за несколько шагов — дай финальный итог что сделано.
-- НЕ предлагай нумерованные варианты выбора (1, 2, 3). Вместо этого действуй сразу или задай конкретный вопрос.
-- Если запрос неясен — задай ОДИН уточняющий вопрос, а не меню из вариантов.`;
+- Финальный итог — что сделано, какие файлы созданы.
+- Не предлагай меню из вариантов — действуй или задай ОДИН вопрос.`;
 
 // === Agent: парсинг действий ===
 function parseAction(text) {
@@ -2041,7 +2542,7 @@ function isBashBlocked(cmd) {
   return BASH_BLACKLIST.some(pattern => pattern.test(cmd));
 }
 
-function executeBashAction(cmd) {
+function executeBashAction(cmd, workDir) {
   return new Promise((resolve) => {
     if (isBashBlocked(cmd)) {
       resolve({ success: false, output: 'ЗАБЛОКИРОВАНО: команда запрещена по соображениям безопасности' });
@@ -2049,7 +2550,7 @@ function executeBashAction(cmd) {
     }
     const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'CLAUDECODE'));
     const child = spawn('bash', ['-c', cmd], {
-      cwd: config.workDir,
+      cwd: workDir || '/tmp',
       env: cleanEnv,
       stdio: ['pipe', 'pipe', 'pipe']
     });
@@ -2096,7 +2597,8 @@ function executeSearchAction(query) {
 }
 
 function executeFileAction(chatId, filePath) {
-  const resolved = path.resolve(config.workDir, filePath);
+  const uc = getUserConfig(chatId);
+  const resolved = path.resolve(uc.workDir, filePath);
   if (!fs.existsSync(resolved)) {
     return { success: false, output: `Файл не найден: ${resolved}` };
   }
@@ -2104,19 +2606,176 @@ function executeFileAction(chatId, filePath) {
   return { success: true, output: `Файл отправлен: ${resolved}` };
 }
 
-async function executeAction(chatId, action) {
+function executeSkillAction(chatId, body) {
+  const lines = body.split('\n');
+  const skillName = lines[0].trim().toLowerCase();
+  const context = lines.slice(1).join('\n').trim();
+  const uc = getUserConfig(chatId);
+  const skill = (uc.skills || []).find(s => s.name.toLowerCase() === skillName);
+  if (!skill) {
+    return { success: false, output: `Навык "${skillName}" не найден. Доступные: ${(uc.skills || []).map(s => s.name).join(', ') || 'нет'}` };
+  }
+  skill.uses = (skill.uses || 0) + 1;
+  skill.lastUsed = Date.now();
+  saveUserConfig(chatId);
+  const result = `[SKILL: ${skill.name}]\n${skill.prompt}\n${context ? `\nКонтекст: ${context}` : ''}\n[/SKILL]`;
+  return { success: true, output: result };
+}
+
+async function executeDelegateAction(chatId, body, statusUpdater) {
+  // Парсим роль, задачу, контекст
+  const roleMatch = body.match(/роль:\s*(\w+)/i) || body.match(/role:\s*(\w+)/i);
+  const taskMatch = body.match(/задача:\s*(.+)/i) || body.match(/task:\s*(.+)/i);
+  const ctxMatch = body.match(/контекст:\s*([\s\S]*)/i) || body.match(/context:\s*([\s\S]*)/i);
+
+  const role = roleMatch ? roleMatch[1].toLowerCase() : 'executor';
+  const task = taskMatch ? taskMatch[1].trim() : body.split('\n')[0];
+  const context = ctxMatch ? ctxMatch[1].trim() : '';
+
+  if (!AGENT_ROLES[role]) {
+    return { success: false, output: `Неизвестная роль: ${role}. Доступные: ${Object.keys(AGENT_ROLES).join(', ')}` };
+  }
+
+  const roleInfo = AGENT_ROLES[role];
+  const subAgentId = `sub_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+
+  // Логируем в трекер
+  const tracker = multiAgentTasks.get(chatId);
+  if (tracker) {
+    tracker.agents.push({ id: subAgentId, role, task: task.slice(0, 100), status: 'running', startTime: Date.now() });
+    tracker.log.push(`${roleInfo.icon} ${roleInfo.label} запущен: ${task.slice(0, 80)}`);
+  }
+
+  if (statusUpdater) statusUpdater(`${roleInfo.icon} Субагент: ${roleInfo.label}\n📋 ${task.slice(0, 120)}`);
+
+  // Формируем промпт субагента
+  const subPrompt = SUB_AGENT_PROMPT_TEMPLATE(role, task, context);
+  const uc = getUserConfig(chatId);
+  const subModel = uc.model;
+
+  try {
+    // Субагент выполняет до 3 шагов
+    const subMessages = [{ role: 'user', content: task + (context ? `\n\nКонтекст:\n${context}` : '') }];
+    let subResult = '';
+    const subMaxSteps = 3;
+
+    for (let subStep = 0; subStep < subMaxSteps; subStep++) {
+      const aiResult = await callAI(subModel, normalizeMessages(subMessages), subPrompt, true);
+      const responseText = aiResult.text.trim();
+
+      const subAction = parseAction(responseText);
+      if (!subAction) {
+        subResult = responseText;
+        break;
+      }
+
+      // Субагент хочет выполнить действие
+      if (statusUpdater) statusUpdater(`${roleInfo.icon} ${roleInfo.label} → [${subAction.name}]\n${subAction.textBefore || ''}`);
+
+      if (subAction.name === 'delegate') {
+        subResult = responseText.replace(subAction.fullMatch, '').trim() + '\n(Субагент не может делегировать дальше)';
+        break;
+      }
+
+      const actionResult = await executeAction(chatId, subAction);
+      subMessages.push({ role: 'assistant', content: responseText });
+      subMessages.push({ role: 'user', content: `[RESULT: ${subAction.name}]\n${actionResult.output}\n[/RESULT]` });
+
+      if (subStep === subMaxSteps - 1) {
+        subResult = `Субагент выполнил ${subMaxSteps} шагов. Последний результат: ${actionResult.output.slice(0, 500)}`;
+      }
+    }
+
+    // Обновляем статус субагента
+    if (tracker) {
+      const agent = tracker.agents.find(a => a.id === subAgentId);
+      if (agent) { agent.status = 'done'; agent.endTime = Date.now(); }
+      tracker.log.push(`${roleInfo.icon} ${roleInfo.label} завершён ✅`);
+    }
+
+    return { success: true, output: `[СУБАГЕНТ ${roleInfo.icon} ${roleInfo.label}]\n${subResult}\n[/СУБАГЕНТ]` };
+
+  } catch (e) {
+    if (tracker) {
+      const agent = tracker.agents.find(a => a.id === subAgentId);
+      if (agent) { agent.status = 'error'; agent.error = e.message; }
+      tracker.log.push(`${roleInfo.icon} ${roleInfo.label} ошибка ❌: ${e.message}`);
+    }
+    return { success: false, output: `Ошибка субагента ${roleInfo.label}: ${e.message}` };
+  }
+}
+
+async function executeAction(chatId, action, statusUpdater) {
+  const uc = getUserConfig(chatId);
+  const effectiveWorkDir = isAdmin(chatId) ? uc.workDir : '/tmp';
   switch (action.name) {
-    case 'bash': return await executeBashAction(action.body);
+    case 'bash': {
+      if (!isAdmin(chatId) && /\bcd\s+\/(Users|home|root|etc|var|opt)\b/.test(action.body)) {
+        return { success: false, output: 'ЗАБЛОКИРОВАНО: доступ к системным директориям запрещён' };
+      }
+      return await executeBashAction(action.body, effectiveWorkDir);
+    }
     case 'remind': return executeRemindAction(chatId, action.body);
     case 'search': return executeSearchAction(action.body);
     case 'file': return executeFileAction(chatId, action.body);
+    case 'skill': return executeSkillAction(chatId, action.body);
+    case 'delegate': return await executeDelegateAction(chatId, action.body, statusUpdater);
     case 'think': return { success: true, output: '(размышление завершено)', silent: true };
     default: return { success: false, output: `Неизвестное действие: ${action.name}` };
   }
 }
 
+// === Live Status Display ===
+function buildStatusMessage(opts) {
+  const { model, provider, step, maxSteps, startTime, thought, actionName, actionDetail, subAgents, phase, error } = opts;
+  const elapsed = Math.round((Date.now() - startTime) / 1000);
+  const providerLabel = PROVIDER_LABELS[provider] || provider;
+  let lines = [];
+
+  // Заголовок
+  lines.push(`🤖 ${providerLabel} ${model} | ⏱ ${elapsed}с`);
+
+  // Прогресс шагов
+  const stepBar = '●'.repeat(step) + '○'.repeat(Math.max(0, maxSteps - step));
+  lines.push(`📊 Шаг ${step}/${maxSteps} ${stepBar}`);
+
+  // Фаза
+  if (phase) lines.push(`\n${phase}`);
+
+  // Мысли агента
+  if (thought) {
+    const trimmed = thought.slice(0, 200);
+    lines.push(`\n💭 ${trimmed}${thought.length > 200 ? '...' : ''}`);
+  }
+
+  // Текущее действие
+  if (actionName) {
+    const icons = { bash: '⚡', remind: '⏰', file: '📄', skill: '🎯', delegate: '🤝', think: '🧠' };
+    const icon = icons[actionName] || '🔄';
+    lines.push(`\n${icon} Действие: ${actionName}`);
+    if (actionDetail) lines.push(`   ${actionDetail.slice(0, 150)}`);
+  }
+
+  // Субагенты
+  if (subAgents && subAgents.length > 0) {
+    lines.push(`\n👥 Субагенты:`);
+    for (const sa of subAgents) {
+      const roleInfo = AGENT_ROLES[sa.role] || { icon: '🔄', label: sa.role };
+      const statusIcon = sa.status === 'done' ? '✅' : sa.status === 'error' ? '❌' : '⏳';
+      const dur = sa.endTime ? ` (${Math.round((sa.endTime - sa.startTime) / 1000)}с)` : '';
+      lines.push(`   ${statusIcon} ${roleInfo.icon} ${roleInfo.label}: ${sa.task.slice(0, 60)}${dur}`);
+    }
+  }
+
+  // Ошибка
+  if (error) lines.push(`\n❌ ${error}`);
+
+  return lines.join('\n');
+}
+
 async function runClaude(chatId, text) {
-  let model = config.model;
+  const uc = getUserConfig(chatId);
+  let model = uc.model;
   let prompt = text;
 
   let manualModel = false;
@@ -2129,7 +2788,7 @@ async function runClaude(chatId, text) {
   }
 
   let autoReason = '';
-  if (config.autoModel && !manualModel) {
+  if (uc.autoModel && !manualModel) {
     const auto = autoSelectModel(prompt);
     const selectedProvider = getProvider(auto.model);
     const providerAvailable = selectedProvider === 'anthropic' ||
@@ -2170,14 +2829,55 @@ async function runClaude(chatId, text) {
   activeClaudeCount++;
   activeTasks.set(chatId, { timer: null, msgId: statusMsgId });
 
-  const agentEnabled = config.agentMode !== false;
+  const agentEnabled = uc.agentMode !== false;
+  const multiAgentEnabled = uc.multiAgent !== false && agentEnabled;
   const basePrompt = agentEnabled ? AGENT_SYSTEM_PROMPT : BOT_SYSTEM_PROMPT;
-  const fullSystemPrompt = [basePrompt, config.systemPrompt].filter(Boolean).join('\n\n');
-  const maxSteps = config.agentMaxSteps || 5;
+
+  let skillsPrompt = '';
+  const skills = uc.skills || [];
+  if (skills.length > 0) {
+    skillsPrompt = '\n\n## Доступные навыки пользователя\nКогда задача совпадает с навыком — используй [ACTION: skill] для его вызова.\n';
+    skills.forEach((s, i) => {
+      const catLabel = (SKILL_CATEGORIES.find(c => c.id === s.category) || {}).label || '📦';
+      const desc = s.description ? ` (${s.description})` : '';
+      skillsPrompt += `${i + 1}. ${catLabel} **${s.name}**${desc}:\n   ${s.prompt}\n`;
+    });
+    skillsPrompt += '\nДля вызова используй:\n[ACTION: skill]\nимя_навыка\nдополнительный контекст\n[/ACTION]';
+  }
+
+  // Если мульти-агент отключён — убираем delegate из промпта
+  let effectiveBasePrompt = basePrompt;
+  if (!multiAgentEnabled && agentEnabled) {
+    effectiveBasePrompt = basePrompt.replace(/\[ACTION: delegate\][\s\S]*?\[\/ACTION\]\n?/, '').replace(/5\. \*\*delegate\*\*[^\n]*\n?/, '').replace(/6\. \*\*think\*\*/, '5. **think**').replace(/## Роли субагентов[\s\S]*?(?=## Среда)/, '');
+  }
+
+  const fullSystemPrompt = [effectiveBasePrompt, skillsPrompt, uc.systemPrompt].filter(Boolean).join('\n\n');
+  const maxSteps = uc.agentMaxSteps || 10;
+
+  // Инициализируем трекер мульти-агента
+  const tracker = { orchestratorMsgId: statusMsgId, agents: [], log: [], startTime };
+  multiAgentTasks.set(chatId, tracker);
+
+  // Состояние для live display
+  const statusState = { model, provider, step: 0, maxSteps, startTime, thought: null, actionName: null, actionDetail: null, subAgents: tracker.agents, phase: '🔄 Запуск...', error: null };
+
+  let lastStatusUpdate = 0;
+  const updateStatus = (overrides = {}) => {
+    const now = Date.now();
+    if (now - lastStatusUpdate < 800) return; // троттлинг
+    lastStatusUpdate = now;
+    Object.assign(statusState, overrides);
+    if (statusMsgId) {
+      const text = buildStatusMessage(statusState);
+      editText(chatId, statusMsgId, text);
+    }
+  };
 
   try {
     let step = 0;
     let finalText = '';
+    let retryCount = 0;
+    const MAX_RETRIES = 2;
 
     while (step < maxSteps) {
       if (!activeTasks.has(chatId)) {
@@ -2186,49 +2886,34 @@ async function runClaude(chatId, text) {
       }
       step++;
 
-      if (statusMsgId && step > 1) {
-        const elapsed = Math.round((Date.now() - startTime) / 1000);
-        editText(chatId, statusMsgId, `🔄 Шаг ${step}/${maxSteps}... (${elapsed}с)`);
-      }
+      updateStatus({ step, phase: step === 1 ? '🧠 Анализирую запрос...' : `🔄 Шаг ${step}/${maxSteps}`, thought: null, actionName: null, actionDetail: null });
 
       let result;
-      if (config.streaming) {
+      if (uc.streaming) {
         let lastEditTime = 0;
-        let chunkCount = 0;
         let lastLen = 0;
         const onChunk = (partial) => {
           const now = Date.now();
-          if (now - lastEditTime < 2000) return;
+          if (now - lastEditTime < 1500) return;
           lastEditTime = now;
-          chunkCount++;
           lastLen = partial.length;
-          const elapsed = Math.round((now - startTime) / 1000);
-          // Прогресс-бар: логарифмическая шкала, плавно растёт до 95%
           const pct = Math.min(Math.round(95 * (1 - Math.exp(-lastLen / 1500))), 95);
           const filled = Math.round(pct / 5);
           const bar = '█'.repeat(filled) + '░'.repeat(20 - filled);
-          const stepInfo = agentEnabled && step > 1 ? `\n🔄 Шаг ${step}/${maxSteps}` : '';
-          if (statusMsgId) editText(chatId, statusMsgId, `⏳ ${bar} ${pct}% (${elapsed}с)${stepInfo}`);
+          updateStatus({ phase: `⏳ ${bar} ${pct}%` });
         };
-        result = await callAIStream(model, normalizeMessages(messages), fullSystemPrompt, onChunk);
-        // Финальное обновление на 100%
-        if (statusMsgId) {
-          const elapsed = Math.round((Date.now() - startTime) / 1000);
-          editText(chatId, statusMsgId, `✅ ${'█'.repeat(20)} 100% (${elapsed}с)`);
-        }
+        result = await callAIStream(model, normalizeMessages(messages), fullSystemPrompt, onChunk, true);
       } else {
-        // Classic mode — анимация ожидания
         let dots = 0;
         const frames = ['🔄', '⏳', '🤖', '💭'];
         const timer = setInterval(() => {
           dots++;
-          const elapsed = Math.round((Date.now() - startTime) / 1000);
           const frame = frames[dots % frames.length];
-          if (statusMsgId) editText(chatId, statusMsgId, `${frame} ${model} работает... ${elapsed}с`);
-        }, 3000);
+          updateStatus({ phase: `${frame} Генерация ответа...` });
+        }, 2500);
         activeTasks.get(chatId).timer = timer;
         try {
-          result = await callAI(model, normalizeMessages(messages), fullSystemPrompt);
+          result = await callAI(model, normalizeMessages(messages), fullSystemPrompt, true);
         } finally {
           clearInterval(timer);
         }
@@ -2251,15 +2936,49 @@ async function runClaude(chatId, text) {
         break;
       }
 
-      // Показываем прогресс через редактирование статус-сообщения (не send!)
-      if (action.textBefore && statusMsgId) {
-        const elapsed = Math.round((Date.now() - startTime) / 1000);
-        editText(chatId, statusMsgId, `💭 ${cleanMarkdown(action.textBefore).slice(0, 200)}\n\n🔄 Шаг ${step}/${maxSteps} (${elapsed}с)`);
-      }
+      // Обновляем статус: мысли агента + действие
+      const thought = action.textBefore ? cleanMarkdown(action.textBefore) : null;
+      updateStatus({
+        thought,
+        actionName: action.name,
+        actionDetail: action.name === 'think' ? action.body.slice(0, 150) : action.body.split('\n')[0],
+        phase: action.name === 'think' ? '🧠 Размышляю...' :
+               action.name === 'delegate' ? '🤝 Делегирую субагенту...' :
+               action.name === 'bash' ? '⚡ Выполняю команду...' :
+               action.name === 'file' ? '📄 Отправляю файл...' :
+               action.name === 'skill' ? '🎯 Вызываю навык...' :
+               `🔄 ${action.name}...`
+      });
 
-      const actionResult = await executeAction(chatId, action);
+      // Функция обновления статуса для субагентов
+      const subStatusUpdater = (detail) => {
+        updateStatus({ actionDetail: detail, phase: '🤝 Субагент работает...' });
+      };
+
+      const actionResult = await executeAction(chatId, action, subStatusUpdater);
 
       console.log(`🤖 Agent step ${step}: [${action.name}] → ${actionResult.success ? 'OK' : 'FAIL'} (${actionResult.output.slice(0, 100)})`);
+
+      // Самокоррекция: если действие провалилось и есть retry
+      if (!actionResult.success && retryCount < MAX_RETRIES) {
+        retryCount++;
+        updateStatus({ phase: `🔧 Самокоррекция (попытка ${retryCount}/${MAX_RETRIES})...`, error: actionResult.output.slice(0, 100) });
+        tracker.log.push(`🔧 Самокоррекция: ${actionResult.output.slice(0, 80)}`);
+
+        messages.push({ role: 'assistant', content: responseText });
+        messages.push({
+          role: 'user',
+          content: `[ERROR: ${action.name}]\n${actionResult.output}\n[/ERROR]\n\nДействие не удалось. Проанализируй ошибку и попробуй другой подход. Исправь проблему и продолжи выполнение.`
+        });
+        continue;
+      }
+
+      if (!actionResult.success) {
+        updateStatus({ error: actionResult.output.slice(0, 100) });
+      } else {
+        updateStatus({ error: null });
+        retryCount = 0; // Сбрасываем retry при успехе
+      }
 
       messages.push({ role: 'assistant', content: responseText });
       messages.push({
@@ -2268,9 +2987,10 @@ async function runClaude(chatId, text) {
       });
     }
 
+    // === Финальный вывод ===
     activeTasks.delete(chatId);
     activeClaudeCount--;
-    if (statusMsgId) del(chatId, statusMsgId);
+    multiAgentTasks.delete(chatId);
 
     const displayText = cleanMarkdown(finalText) || (agentEnabled && step > 1 ? '✅ Задача выполнена.' : 'Готово (без вывода)');
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -2278,6 +2998,26 @@ async function runClaude(chatId, text) {
 
     addToHistory(chatId, 'assistant', displayText);
     lastResponse.set(chatId, { text: displayText, prompt });
+
+    // Финальный статус + агенты лог
+    const agentsSummary = tracker.agents.length > 0
+      ? `\n\n👥 Субагенты: ${tracker.agents.length}\n${tracker.agents.map(a => {
+          const ri = AGENT_ROLES[a.role] || { icon: '🔄', label: a.role };
+          const dur = a.endTime ? ` ${Math.round((a.endTime - a.startTime) / 1000)}с` : '';
+          const st = a.status === 'done' ? '✅' : '❌';
+          return `${st} ${ri.icon} ${ri.label}${dur}`;
+        }).join('\n')}`
+      : '';
+
+    const logSummary = tracker.log.length > 0
+      ? `\n\n📋 Лог:\n${tracker.log.slice(-5).join('\n')}`
+      : '';
+
+    // Обновляем статусное сообщение на итог
+    if (statusMsgId) {
+      const summary = `✅ Завершено за ${elapsed}с | ${step} шаг${step > 1 ? (step < 5 ? 'а' : 'ов') : ''} | ${model}${agentsSummary}${logSummary}`;
+      editText(chatId, statusMsgId, summary);
+    }
 
     send(chatId, displayText);
 
@@ -2288,9 +3028,10 @@ async function runClaude(chatId, text) {
   } catch (e) {
     activeTasks.delete(chatId);
     activeClaudeCount--;
+    multiAgentTasks.delete(chatId);
     stats.errors++;
     console.error(`❌ ${model} error: ${e.message}`);
-    if (statusMsgId) del(chatId, statusMsgId);
+    if (statusMsgId) editText(chatId, statusMsgId, `❌ Ошибка ${model}: ${e.message}`);
     send(chatId, `❌ Ошибка ${model}: ${e.message}`);
   }
 
@@ -2315,7 +3056,11 @@ async function processUpdate(upd) {
   console.log(`📨 ${msg.text || '[файл/медиа]'}`);
   stats.messages++;
 
-  if (!allowedIds.includes(userId)) { send(chatId, `❌ Нет доступа. ID: ${userId}`); return; }
+  // Инициализация per-user конфига (новый пользователь получит дефолтные настройки)
+  const uc = getUserConfig(chatId);
+
+  // Бан-проверка
+  if (uc.banned) { send(chatId, '❌ Ваш доступ заблокирован'); return; }
 
   // Обработка голосовых
   if (msg.voice || msg.audio) { stats.voiceMessages++; handleVoice(chatId, msg); return; }
@@ -2461,46 +3206,83 @@ async function processUpdate(upd) {
   // Ожидание системного промпта
   if (waitingSystemPrompt.has(chatId)) {
     waitingSystemPrompt.delete(chatId);
-    config.systemPrompt = text;
-    saveConfig();
-    send(chatId, `✅ Системный промпт установлен:\n${text}`, mainMenu());
+    uc.systemPrompt = text;
+    saveUserConfig(chatId);
+    send(chatId, `✅ Системный промпт установлен:\n${text}`, mainMenu(chatId));
     return;
   }
 
-  // Ожидание имени шаблона
-  if (waitingTemplateName.has(chatId)) {
-    waitingTemplateName.delete(chatId);
-    waitingTemplatePrompt.set(chatId, text.trim());
-    send(chatId, `📌 Имя: ${text.trim()}\n\nТеперь введите промпт для шаблона:`, { reply_markup: { inline_keyboard: [[{ text: '◀️ Отмена', callback_data: 'templates' }]] } });
+  // Ожидание редактирования полей навыка
+  if (waitingSkillEditName.has(chatId)) {
+    const idx = waitingSkillEditName.get(chatId);
+    waitingSkillEditName.delete(chatId);
+    if (uc.skills && uc.skills[idx]) {
+      uc.skills[idx].name = text.trim();
+      saveUserConfig(chatId);
+      send(chatId, `✅ Имя обновлено: ${text.trim()}`, { reply_markup: { inline_keyboard: [[{ text: '◀️ К навыку', callback_data: `skill_info_${idx}` }]] } });
+    }
     return;
   }
-  if (waitingTemplatePrompt.has(chatId)) {
-    const name = waitingTemplatePrompt.get(chatId);
-    waitingTemplatePrompt.delete(chatId);
-    if (!config.templates) config.templates = [];
-    config.templates.push({ name, prompt: text });
-    saveConfig();
-    send(chatId, `✅ Шаблон "${name}" сохранён`, mainMenu());
+  if (waitingSkillEditPrompt.has(chatId)) {
+    const idx = waitingSkillEditPrompt.get(chatId);
+    waitingSkillEditPrompt.delete(chatId);
+    if (uc.skills && uc.skills[idx]) {
+      uc.skills[idx].prompt = text;
+      saveUserConfig(chatId);
+      send(chatId, `✅ Промпт "${uc.skills[idx].name}" обновлён (${text.length} символов)`, { reply_markup: { inline_keyboard: [[{ text: '◀️ К навыку', callback_data: `skill_info_${idx}` }]] } });
+    }
+    return;
+  }
+  if (waitingSkillEditDesc.has(chatId)) {
+    const idx = waitingSkillEditDesc.get(chatId);
+    waitingSkillEditDesc.delete(chatId);
+    if (uc.skills && uc.skills[idx]) {
+      uc.skills[idx].description = text.trim();
+      saveUserConfig(chatId);
+      send(chatId, `✅ Описание "${uc.skills[idx].name}" обновлено`, { reply_markup: { inline_keyboard: [[{ text: '◀️ К навыку', callback_data: `skill_info_${idx}` }]] } });
+    }
+    return;
+  }
+
+  // Ожидание имени навыка → wizard: выбор категории
+  if (waitingSkillName.has(chatId)) {
+    waitingSkillName.delete(chatId);
+    const skillName = text.trim();
+    waitingSkillCategory.set(chatId, skillName);
+    const catRows = SKILL_CATEGORIES.map(c => [{ text: c.label, callback_data: `newskill_cat_${c.id}` }]);
+    catRows.push([{ text: '⏩ Пропустить', callback_data: 'newskill_cat_other' }]);
+    send(chatId, `⚡ Имя: ${skillName}\n\n📂 Выберите категорию:`, { reply_markup: { inline_keyboard: catRows } });
+    return;
+  }
+  if (waitingSkillPrompt.has(chatId)) {
+    const pending = waitingSkillPrompt.get(chatId);
+    waitingSkillPrompt.delete(chatId);
+    const name = typeof pending === 'object' ? pending.name : pending;
+    const category = typeof pending === 'object' ? pending.category : 'other';
+    if (!uc.skills) uc.skills = [];
+    uc.skills.push({ name, prompt: text, description: '', category, uses: 0, lastUsed: null });
+    saveUserConfig(chatId);
+    send(chatId, `✅ Навык "${name}" сохранён`, mainMenu(chatId));
     return;
   }
 
   // Ожидание пути
   if (waitingDir.has(chatId)) {
     waitingDir.delete(chatId);
-    if (fs.existsSync(text)) { config.workDir = text; saveConfig(); send(chatId, `✅ Папка: ${text}`, mainMenu()); }
+    if (fs.existsSync(text)) { uc.workDir = text; saveUserConfig(chatId); send(chatId, `✅ Папка: ${text}`, mainMenu(chatId)); }
     else send(chatId, `❌ Не найдена: ${text}`);
     return;
   }
 
-  if (text === '/start' || text === '/menu' || text === '📋 Меню') { send(chatId, '👋 Claude Code Remote', { ...mainMenu, ...persistentKeyboard }); return; }
-  if (text === '/status' || text === '📊 Статус') { send(chatId, `📊 🤖 ${config.model} (${PROVIDER_LABELS[getProvider(config.model)] || ''}) | 📁 ${config.workDir} | ⏱ ${config.timeout}с | 🧠 AI: ${activeClaudeCount}/${MAX_CLAUDE_PROCS}`, mainMenu()); return; }
-  if (text === '/settings' || text === '⚙️ Настройки') { send(chatId, '⚙️ Настройки:', settingsMenu()); return; }
+  if (text === '/start' || text === '/menu' || text === '📋 Меню') { send(chatId, '👋 Claude Code Remote', { ...mainMenu(chatId), ...persistentKeyboard }); return; }
+  if (text === '/status' || text === '📊 Статус') { send(chatId, `📊 🤖 ${uc.model} (${PROVIDER_LABELS[getProvider(uc.model)] || ''}) | 📁 ${uc.workDir} | ⏱ ${uc.timeout}с | 🧠 AI: ${activeClaudeCount}/${MAX_CLAUDE_PROCS}`, mainMenu(chatId)); return; }
+  if (text === '/settings' || text === '⚙️ Настройки') { send(chatId, '⚙️ Настройки:', settingsMenu(chatId)); return; }
   if (text === '/stop' || text === '⛔ Стоп') { stopTask(chatId); send(chatId, '⛔ Остановлено'); return; }
   if (text === '/clear') { clearHistory(chatId); messageQueue.delete(chatId); send(chatId, '🗑 История и очередь очищены'); return; }
   if (text === '/help') { send(chatId, helpText()); return; }
   if (text === '/notebook' || text === '/nb' || text === '📓 NB') { send(chatId, '📓 NotebookLM', nbMainMenu); return; }
 
-  if (text.startsWith('/bash ')) { runBash(chatId, text.slice(6)); return; }
+  if (text.startsWith('/bash ')) { if (!isAdmin(chatId)) { send(chatId, '❌ Только для администраторов'); return; } runBash(chatId, text.slice(6)); return; }
 
   // /web — поиск в интернете через Claude
   if (text.startsWith('/web ')) {
@@ -2512,28 +3294,93 @@ async function processUpdate(upd) {
 
   if (text.startsWith('/file ')) { sendDocument(chatId, text.slice(6).trim()); return; }
 
-  // /save — сохранить шаблон
-  if (text.startsWith('/save ')) {
-    const parts = text.slice(6).trim().split(/\s+/);
+  // /skill — навыки: создание, редактирование, инфо
+  if (text.startsWith('/skill ')) {
+    const args = text.slice(7).trim();
+    // /skill edit <имя>
+    if (args.startsWith('edit ')) {
+      const skillName = args.slice(5).trim().toLowerCase();
+      const idx = (uc.skills || []).findIndex(s => s.name.toLowerCase() === skillName);
+      if (idx === -1) { send(chatId, `❌ Навык "${skillName}" не найден`); return; }
+      const skill = uc.skills[idx];
+      send(chatId, `✏️ Редактирование: ${skill.name}`, { reply_markup: { inline_keyboard: [
+        [{ text: '📝 Имя', callback_data: `skedit_name_${idx}` }, { text: '📄 Промпт', callback_data: `skedit_prompt_${idx}` }],
+        [{ text: '📝 Описание', callback_data: `skedit_desc_${idx}` }, { text: '📂 Категория', callback_data: `skedit_cat_${idx}` }],
+        [{ text: '◀️ К навыку', callback_data: `skill_info_${idx}` }],
+      ] } });
+      return;
+    }
+    // /skill info <имя>
+    if (args.startsWith('info ')) {
+      const skillName = args.slice(5).trim().toLowerCase();
+      const idx = (uc.skills || []).findIndex(s => s.name.toLowerCase() === skillName);
+      if (idx === -1) { send(chatId, `❌ Навык "${skillName}" не найден`); return; }
+      const skill = uc.skills[idx];
+      const catLabel = (SKILL_CATEGORIES.find(c => c.id === skill.category) || {}).label || '📦 Другое';
+      const lastUsedStr = skill.lastUsed ? new Date(skill.lastUsed).toLocaleString('ru-RU') : 'никогда';
+      const promptPreview = skill.prompt.length > 300 ? skill.prompt.slice(0, 300) + '...' : skill.prompt;
+      const desc = skill.description ? `\n📝 ${skill.description}` : '';
+      send(chatId, `⚡ ${skill.name}${desc}\n\n📂 Категория: ${catLabel}\n📊 Использований: ${skill.uses || 0}\n🕐 Последний запуск: ${lastUsedStr}\n\n📄 Промпт:\n${promptPreview}`, { reply_markup: { inline_keyboard: [
+        [{ text: '▶️ Запуск', callback_data: `skill_run_${idx}` }, { text: '✏️ Редактировать', callback_data: `skill_edit_${idx}` }],
+        [{ text: '◀️ К навыкам', callback_data: 'skills_menu' }],
+      ] } });
+      return;
+    }
+    // /skill <имя> <промпт> — создание
+    const parts = args.split(/\s+/);
     const name = parts[0];
     const prompt = parts.slice(1).join(' ');
-    if (!name || !prompt) { send(chatId, '❌ Формат: /save имя промпт\nПример: /save review Сделай code review этого файла'); return; }
-    if (!config.templates) config.templates = [];
-    config.templates.push({ name, prompt });
-    saveConfig();
-    send(chatId, `✅ Шаблон "${name}" сохранён\nЗапуск: /t ${name}`);
+    if (!name || !prompt) { send(chatId, '❌ Формат: /skill имя промпт\nПример: /skill review Сделай code review\n\n/skill edit <имя> — редактировать\n/skill info <имя> — информация'); return; }
+    if (!uc.skills) uc.skills = [];
+    uc.skills.push({ name, prompt, description: '', category: 'other', uses: 0, lastUsed: null });
+    saveUserConfig(chatId);
+    send(chatId, `✅ Навык "${name}" сохранён\nЗапуск: /s ${name}`);
     return;
   }
 
-  // /t — запуск шаблона по имени
-  if (text.startsWith('/t ')) {
+  // /s — запуск навыка по имени
+  if (text.startsWith('/s ')) {
     const name = text.slice(3).trim().toLowerCase();
-    const tpl = (config.templates || []).find(t => t.name.toLowerCase() === name);
-    if (tpl) { runClaude(chatId, tpl.prompt); }
-    else { send(chatId, `❌ Шаблон "${name}" не найден. /templates — список`); }
+    const skill = (uc.skills || []).find(t => t.name.toLowerCase() === name);
+    if (skill) {
+      skill.uses = (skill.uses || 0) + 1;
+      skill.lastUsed = Date.now();
+      saveUserConfig(chatId);
+      runClaude(chatId, skill.prompt);
+    }
+    else { send(chatId, `❌ Навык "${name}" не найден. /skills — список`); }
     return;
   }
-  if (text === '/templates') { send(chatId, '📌 Шаблоны', { reply_markup: { inline_keyboard: [...(config.templates || []).map((t, i) => [{ text: `📌 ${t.name}`, callback_data: `tpl_run_${i}` }, { text: '🗑', callback_data: `tpl_del_${i}` }]), [{ text: '➕ Создать', callback_data: 'tpl_create' }], [{ text: '◀️ Назад', callback_data: 'back' }]] } }); return; }
+  if (text === '/skills') {
+    // Используем тот же формат что и callback skills_menu
+    const skills = uc.skills || [];
+    if (skills.length === 0) {
+      send(chatId, '⚡ Навыки пусты\n\n/skill <имя> <промпт> — создать', { reply_markup: { inline_keyboard: [[{ text: '➕ Создать', callback_data: 'skill_create' }, { text: '📦 Галерея', callback_data: 'skill_presets' }], [{ text: '◀️ Назад', callback_data: 'back' }]] } });
+    } else {
+      const rows = skills.map((t, i) => {
+        const useBadge = t.uses > 0 ? ` (${t.uses})` : '';
+        return [{ text: `⚡ ${t.name}${useBadge}`, callback_data: `skill_run_${i}` }, { text: 'ℹ️', callback_data: `skill_info_${i}` }, { text: '🗑', callback_data: `skill_del_${i}` }];
+      });
+      rows.push([{ text: '➕ Создать', callback_data: 'skill_create' }, { text: '📦 Галерея', callback_data: 'skill_presets' }]);
+      rows.push([{ text: '◀️ Назад', callback_data: 'back' }]);
+      send(chatId, `⚡ Навыки (${skills.length}):`, { reply_markup: { inline_keyboard: rows } });
+    }
+    return;
+  }
+
+  // /agents — статус мульти-агентной системы
+  if (text === '/agents') {
+    const rolesText = Object.entries(AGENT_ROLES).map(([k, v]) => `${v.icon} ${v.label} — ${v.desc}`).join('\n');
+    const multiOn = uc.multiAgent !== false;
+    const agentOn = uc.agentMode !== false;
+    send(chatId, `👥 Мульти-агентная система\n\nСтатус: ${multiOn && agentOn ? '✅ Активна' : '❌ Выключена'}\nАгент-режим: ${agentOn ? '✅' : '❌'}\nМульти-агент: ${multiOn ? '✅' : '❌'}\nМакс шагов: ${uc.agentMaxSteps || 10}\nСамокоррекция: ✅ (до 2 попыток)\n\n🎭 Роли субагентов:\n${rolesText}\n\n💡 Агент автоматически создаёт субагентов для сложных задач. Каждый субагент специализирован и может выполнять до 3 шагов.\n\nВесь прогресс отображается в одном обновляемом сообщении.`, { reply_markup: { inline_keyboard: [
+      [{ text: `👥 Мульти-агент: ${multiOn ? '✅' : '❌'}`, callback_data: 'toggle_multi' }],
+      [{ text: `🤖 Агент: ${agentOn ? '✅' : '❌'}`, callback_data: 'toggle_agent' }],
+      [{ text: `🔢 Макс шагов: ${uc.agentMaxSteps || 10}`, callback_data: 'set_max_steps' }],
+      [{ text: '◀️ Меню', callback_data: 'back' }],
+    ] } });
+    return;
+  }
 
   // /remind — напоминание (персистентное)
   if (text.startsWith('/remind ')) {
@@ -2626,22 +3473,22 @@ async function processUpdate(upd) {
   if (text === '/pin') {
     const last = lastResponse.get(chatId);
     if (!last) { send(chatId, '❌ Нет ответа для закрепления'); return; }
-    if (!config.pins) config.pins = [];
-    config.pins.push({ text: last.text.slice(0, 500), prompt: last.prompt, date: Date.now() });
-    if (config.pins.length > 20) config.pins.shift();
-    saveConfig();
-    send(chatId, `📌 Закреплено (${config.pins.length}/20)`);
+    if (!uc.pins) uc.pins = [];
+    uc.pins.push({ text: last.text.slice(0, 500), prompt: last.prompt, date: Date.now() });
+    if (uc.pins.length > 20) uc.pins.shift();
+    saveUserConfig(chatId);
+    send(chatId, `📌 Закреплено (${uc.pins.length}/20)`);
     return;
   }
   if (text === '/pins') {
-    if (!config.pins || config.pins.length === 0) { send(chatId, '📌 Нет закреплённых ответов. Используйте /pin'); return; }
-    const list = config.pins.map((p, i) => `${i + 1}. ${p.text.slice(0, 80)}...`).join('\n');
-    send(chatId, `📌 Закреплённые (${config.pins.length}):\n\n${list}\n\nИспользуйте /pinget <номер> для просмотра`);
+    if (!uc.pins || uc.pins.length === 0) { send(chatId, '📌 Нет закреплённых ответов. Используйте /pin'); return; }
+    const list = uc.pins.map((p, i) => `${i + 1}. ${p.text.slice(0, 80)}...`).join('\n');
+    send(chatId, `📌 Закреплённые (${uc.pins.length}):\n\n${list}\n\nИспользуйте /pinget <номер> для просмотра`);
     return;
   }
   if (text.startsWith('/pinget ')) {
     const idx = parseInt(text.slice(8)) - 1;
-    const pin = (config.pins || [])[idx];
+    const pin = (uc.pins || [])[idx];
     if (!pin) { send(chatId, '❌ Не найдено'); return; }
     send(chatId, `📌 #${idx + 1}\n\n${pin.text}`);
     return;
@@ -2651,22 +3498,23 @@ async function processUpdate(upd) {
   if (text === '/stats') {
     const uptime = Math.round((Date.now() - stats.startTime) / 60000);
     const avgTime = stats.claudeCalls > 0 ? (stats.totalResponseTime / stats.claudeCalls / 1000).toFixed(1) : 0;
-    send(chatId, `📈 Статистика\n\n⏱ Аптайм: ${uptime} мин\n📨 Сообщений: ${stats.messages}\n🤖 Claude вызовов: ${stats.claudeCalls}\n⚡ Ср. время: ${avgTime}с\n🎙 Голосовых: ${stats.voiceMessages}\n📎 Файлов: ${stats.files}\n❌ Ошибок: ${stats.errors}\n🧠 AI: ${activeClaudeCount}/${MAX_CLAUDE_PROCS}\n🤖 Модель: ${config.model}`);
+    send(chatId, `📈 Статистика\n\n⏱ Аптайм: ${uptime} мин\n📨 Сообщений: ${stats.messages}\n🤖 Claude вызовов: ${stats.claudeCalls}\n⚡ Ср. время: ${avgTime}с\n🎙 Голосовых: ${stats.voiceMessages}\n📎 Файлов: ${stats.files}\n❌ Ошибок: ${stats.errors}\n🧠 AI: ${activeClaudeCount}/${MAX_CLAUDE_PROCS}\n🤖 Модель: ${uc.model}`);
     return;
   }
 
   if (text.startsWith('/system ')) {
-    config.systemPrompt = text.slice(8).trim();
-    saveConfig();
-    send(chatId, `✅ Системный промпт: ${config.systemPrompt}`);
+    uc.systemPrompt = text.slice(8).trim();
+    saveUserConfig(chatId);
+    send(chatId, `✅ Системный промпт: ${uc.systemPrompt}`);
     return;
   }
-  if (text === '/clear_system') { config.systemPrompt = ''; saveConfig(); send(chatId, '✅ Системный промпт сброшен'); return; }
+  if (text === '/clear_system') { uc.systemPrompt = ''; saveUserConfig(chatId); send(chatId, '✅ Системный промпт сброшен'); return; }
 
   if (text.startsWith('/parse ')) { processSmartSetup(chatId, text.slice(7)); return; }
   if (text === '/parse') { send(chatId, '🧠 Опишите что парсить. Например:\n/parse Следи за @durov, присылай только анонсы обновлений кратко'); return; }
 
   if (text === '/channels') {
+    if (!isAdmin(chatId)) { send(chatId, '❌ Только для администраторов'); return; }
     const count = config.channels ? config.channels.length : 0;
     const active = config.channels ? config.channels.filter(c => c.enabled).length : 0;
     send(chatId, `📡 Мониторинг каналов\n\nВсего: ${count} | Активных: ${active}`, channelsMenu());
@@ -2674,21 +3522,23 @@ async function processUpdate(upd) {
   }
 
   if (text === '/auth') {
-    if (mtConnected) { send(chatId, `✅ MTProto уже авторизован!`, mainMenu()); }
+    if (!isAdmin(chatId)) { send(chatId, '❌ Только для администраторов'); return; }
+    if (mtConnected) { send(chatId, `✅ MTProto уже авторизован!`, mainMenu(chatId)); }
     else if (!apiId || !apiHash) { send(chatId, '❌ TG_API_ID и TG_API_HASH не заданы в .env'); }
     else { send(chatId, '📱 Введите номер телефона (формат +77001234567):', { reply_markup: { inline_keyboard: [[{ text: '◀️ Отмена', callback_data: 'auth_cancel' }]] } }); waitingAuthPhone.add(chatId); }
     return;
   }
 
   if (text.startsWith('/addch ')) {
+    if (!isAdmin(chatId)) { send(chatId, '❌ Только для администраторов'); return; }
     let username = text.slice(7).trim().replace(/^https?:\/\/(t\.me|telegram\.me)\//i, '').replace(/^@/, '').replace(/\/$/, '').split('/')[0];
     if (!username || username.length < 2) { send(chatId, '❌ Используйте: /addch username'); return; }
     addChannel(chatId, username);
     return;
   }
 
-  if (text === '/git') { runGit(chatId); return; }
-  if (text === '/ps') { runPs(chatId); return; }
+  if (text === '/git') { if (!isAdmin(chatId)) { send(chatId, '❌ Только для администраторов'); return; } runGit(chatId); return; }
+  if (text === '/ps') { if (!isAdmin(chatId)) { send(chatId, '❌ Только для администраторов'); return; } runPs(chatId); return; }
   if (text === '/queue') {
     const qLen = getQueueSize(chatId);
     send(chatId, `📬 Очередь: ${qLen} сообщений\n🔄 AI: ${activeClaudeCount}/${MAX_CLAUDE_PROCS}`);
@@ -2767,7 +3617,7 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
 console.log('🤖 Multi-Model AI Telegram Bot');
-console.log(`🔧 ${config.model} (${getProvider(config.model)}) | ${config.workDir} | ${config.timeout}с`);
+console.log(`🔧 Per-user config system enabled`);
 const availableProviders = ['Anthropic (CLI)'];
 if (process.env.OPENAI_API_KEY) availableProviders.push('OpenAI');
 if (process.env.GEMINI_API_KEY) availableProviders.push('Google');
@@ -2791,6 +3641,9 @@ tgApi('setMyCommands', { commands: [
   { command: 'clear', description: 'Очистить историю' },
   { command: 'help', description: 'Помощь' },
   { command: 'nb', description: 'NotebookLM' },
+  { command: 'skills', description: 'Навыки' },
+  { command: 'skill', description: 'Навык: /skill имя промпт | edit | info' },
+  { command: 'agents', description: 'Мульти-агенты' },
 ]});
 
 tick();
