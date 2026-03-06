@@ -1,182 +1,225 @@
-# 🤖 Telegram Bot для Claude Code
+# 🤖 sCORP — Многоагентный Telegram Bot с Claude, GPT, Gemini & Groq
 
-Telegram бот для удаленного доступа к Claude Code CLI на вашем Mac.
+Продвинутый Telegram бот с поддержкой нескольких AI моделей, автономными агентами, генерацией медиа и интеграциями с различными сервисами.
 
-## 📋 Возможности
+## ✨ Основные возможности
 
-- ✉️ Отправляйте команды Claude через Telegram
-- 🔒 Защита по ID пользователя
-- ⚡ Быстрые ответы в реальном времени
-- 📱 Работает откуда угодно
+### 🧠 Multi-Model AI
+- **Claude** (Anthropic) — основной модель для рассуждений
+- **GPT-4** (OpenAI) — быстрые ответы и текст
+- **Gemini** (Google) — голосовая транскрипция и медиа
+- **Groq** (LPU) — сверхбыстрые ответы в реальном времени
 
-## 🚀 Установка
+### 🤖 Автономные агенты
+- **Multi-agent система** с параллельным выполнением
+- **Динамическое создание агентов** в runtime
+- **Super Agent** с полным контролем над функциями
+- **Skill Manager** для управления способностями
+- **Knowledge Base** с долгосрочной памятью
 
-### Шаг 1: Установка зависимостей
+### 📱 Мультимедиа генерация
+- 🖼️ Генерация изображений (Imagen, Stable Diffusion)
+- 🎥 Создание видео (Veo 3.1, Pika, Runway)
+- 🎙️ Голосовая транскрипция (Gemini 2.5)
+- 📝 Голосовое общение и аудио
+
+### 🔌 Интеграции
+- **Vercel** (развертывание мини-приложений)
+- **Pixel Office Mini App** — визуализация статуса агентов
+- **MCP протокол** (интеграция с 500+ сервисами)
+- **NotebookLM** (глубокие исследования)
+- **Webhook система** для входящих уведомлений
+
+### ⚙️ Система плагинов
+- 🔐 action-logger — логирование всех действий
+- ₿ crypto-price — котировки криптовалют
+- 💱 exchange — курсы валют
+- 📝 notes — личные заметки
+- 🍅 pomodoro — таймер фокуса
+- 🔗 qr — генерация QR-кодов
+- ✅ todo — управление задачами
+- 🌐 translate — переводчик
+- 🌤️ weather — прогноз погоды
+
+### 📊 Продвинутые функции
+- **Emotional Intelligence** модуль для анализа эмоций
+- **Progress Tracker** для отслеживания задач
+- **Status Monitoring** с real-time обновлениями
+- **Memory System** с дедупликацией
+- **Voice Transcription** встроенная в Gemini API
+
+## 🚀 Быстрый старт
+
+### Установка
 
 ```bash
-cd ~/telegram-claude-bot
+# Клонируйте репозиторий
+git clone https://github.com/sCOSTAkg/telegram-claude-bot.git
+cd telegram-claude-bot
+
+# Установите зависимости
 npm install
-```
 
-### Шаг 2: Создание бота в Telegram
-
-1. Откройте Telegram и найдите бота **@BotFather**
-2. Отправьте команду `/newbot`
-3. Следуйте инструкциям:
-   - Введите имя бота (например: "My Claude Bot")
-   - Введите username бота (должен заканчиваться на "bot", например: "my_claude_code_bot")
-4. BotFather отправит вам токен в формате: `1234567890:ABCdefGHIjklMNOpqrsTUVwxyz`
-5. **Скопируйте этот токен!**
-
-### Шаг 3: Получение вашего Telegram ID
-
-1. Найдите в Telegram бота **@userinfobot**
-2. Отправьте ему `/start`
-3. Он покажет ваш ID (например: 123456789)
-4. **Скопируйте этот ID!**
-
-### Шаг 4: Настройка конфигурации
-
-```bash
-# Создайте файл .env из шаблона
+# Создайте .env файл
 cp .env.example .env
-
-# Откройте .env в редакторе
-nano .env
 ```
 
-Вставьте ваши данные:
-```
-TELEGRAM_BOT_TOKEN=1234567890:ABCdefGHIjklMNOpqrsTUVwxyz
-ALLOWED_USER_IDS=123456789
-WORKING_DIR=/Users/guest1
+### Конфигурация
+
+Отредактируйте `.env`:
+
+```env
+# Telegram
+TELEGRAM_BOT_TOKEN=your_bot_token_here
+YOUR_TELEGRAM_ID=your_user_id
+
+# AI Models
+CLAUDE_API_KEY=your_claude_key
+OPENAI_API_KEY=your_openai_key
+GEMINI_API_KEY=your_gemini_key
+GROQ_API_KEY=your_groq_key
+
+# Опциональные сервисы
+VERCEL_TOKEN=your_vercel_token
 ```
 
-Сохраните файл (Ctrl+O, Enter, Ctrl+X в nano).
-
-## ▶️ Запуск бота
+### Запуск
 
 ```bash
-npm start
+# Запустить бота
+node bot.js
+
+# Или с процесс-менеджером (PM2)
+npm install -g pm2
+pm2 start bot.js --name sCORP
+pm2 save
+pm2 startup
 ```
 
-Вы должны увидеть:
-```
-🤖 Telegram-Claude Bot запущен!
-🔒 Разрешенные пользователи: 123456789
-```
+## 📚 Документация
 
-## 📱 Использование
+- **[AGENT_DEV_INSTRUCTIONS.md](AGENT_DEV_INSTRUCTIONS.md)** — Полная инструкция для разработчиков агентов
+- **[AGENT_QUICK_REFERENCE.md](AGENT_QUICK_REFERENCE.md)** — Быстрая справка
+- **[SUPER_AGENT_README.md](SUPER_AGENT_README.md)** — Документация Super Agent
+- **[BOT_INTEGRATION_EXAMPLE.js](BOT_INTEGRATION_EXAMPLE.js)** — Примеры интеграции
+- **[MODULES-README.md](MODULES-README.md)** — Описание модулей
 
-1. Найдите вашего бота в Telegram (по username, который вы создали)
-2. Отправьте `/start`
-3. Начните отправлять команды!
-
-### Примеры команд:
+## 🏗️ Архитектура
 
 ```
-Создай файл test.txt с текстом "Hello World"
+sCORP/
+├── bot.js                          # Главный файл бота (7100+ строк)
+├── config/                         # Конфигурация
+│   ├── agents.js                  # Конфиги агентов
+│   ├── models.js                  # Конфиги моделей
+│   └── modes.js                   # Режимы работы
+├── modules/                        # Основные модули
+│   ├── orchestrator.js            # Оркестрация агентов
+│   ├── parallelEngine.js          # Параллельное выполнение
+│   ├── superAgentFactory.js       # Создание супер-агентов
+│   ├── skillManager.js            # Управление навыками
+│   └── knowledgeBase.js           # База знаний
+├── plugins/                        # Плагины для функциональности
+├── skills/                         # Специальные навыки
+├── miniapp/                        # Pixel Office Mini App (React)
+├── landing/                        # Лендинг страница
+└── src/                           # Исходный код (модульная структура)
 ```
 
-```
-Покажи содержимое текущей директории
-```
+## 🔧 Разработка агентов
 
-```
-Помоги мне исправить ошибку в коде
-```
+### Создать нового агента
 
-### Команды бота:
-
-- `/start` - Приветственное сообщение
-- `/help` - Помощь по использованию
-- `/status` - Проверить статус бота
-- `/clear` - Очистить текущую сессию
-
-## 🔄 Автозапуск при старте системы (опционально)
-
-### Создание launchd service для macOS:
-
-```bash
-# Создайте файл plist
-nano ~/Library/LaunchAgents/com.telegram.claude.bot.plist
+```javascript
+const agent = await botInstance.createAgent({
+  name: 'MyAgent',
+  model: 'claude',
+  instructions: 'Your instructions here',
+  tools: ['web_search', 'code_generation'],
+  mode: 'autonomous'
+});
 ```
 
-Вставьте следующее содержимое:
+### Запустить агента
 
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.telegram.claude.bot</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/usr/local/bin/node</string>
-        <string>/Users/guest1/telegram-claude-bot/bot.js</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>WorkingDirectory</key>
-    <string>/Users/guest1/telegram-claude-bot</string>
-    <key>StandardOutPath</key>
-    <string>/Users/guest1/telegram-claude-bot/bot.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Users/guest1/telegram-claude-bot/bot.error.log</string>
-</dict>
-</plist>
+```javascript
+const result = await agent.execute(userMessage);
 ```
 
-Загрузите службу:
+## 🔐 Безопасность
 
-```bash
-launchctl load ~/Library/LaunchAgents/com.telegram.claude.bot.plist
+- ✅ ID-based доступ (только авторизованные пользователи)
+- ✅ API ключи в `.env` (никогда не в коде)
+- ✅ Логирование всех действий
+- ✅ Аудит безопасности в [SECURITY_AUDIT.md](SECURITY_AUDIT.md)
+
+## 📊 Система мониторинга
+
+Bot отслеживает:
+- 📈 Производительность агентов
+- ⏱️ Время выполнения
+- 🔄 Параллельные задачи
+- 🎯 Выполнение целей
+- 💾 Использование памяти
+
+Визуализация доступна через **Pixel Office Mini App**.
+
+## 🎯 Примеры использования
+
+### Создание контента
+```
+/agent create_content
+Напиши 10 идей для Telegram поста про AI
 ```
 
-Проверьте статус:
-
-```bash
-launchctl list | grep claude
+### Анализ данных
+```
+/agent analyze_data
+CSV: [данные]
+Найди тренды и аномалии
 ```
 
-Для остановки:
-
-```bash
-launchctl unload ~/Library/LaunchAgents/com.telegram.claude.bot.plist
+### Кодирование
+```
+/agent code
+Напишите функцию для парсинга JSON
 ```
 
-## 🔒 Безопасность
+### Мультимодальные задачи
+```
+/parallel
+- Агент 1: Напиши статью
+- Агент 2: Создай изображение
+- Агент 3: Сгенерируй видео
+```
 
-- Бот проверяет ID пользователя перед выполнением команд
-- Только пользователи из `ALLOWED_USER_IDS` могут использовать бота
-- Храните токен бота в секрете!
-- Не делитесь файлом `.env` с другими
+## 🤝 Контрибьютинг
 
-## 🐛 Решение проблем
+1. Fork репозиторий
+2. Создайте feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit изменения (`git commit -m 'Add amazing feature'`)
+4. Push в branch (`git push origin feature/amazing-feature`)
+5. Откройте Pull Request
 
-### Бот не отвечает:
-- Проверьте, запущен ли бот (`npm start`)
-- Проверьте правильность токена в `.env`
-- Убедитесь, что ваш ID добавлен в `ALLOWED_USER_IDS`
+## 📝 Лицензия
 
-### Команды не выполняются:
-- Проверьте, установлен ли Claude Code CLI
-- Проверьте путь `WORKING_DIR` в `.env`
-- Убедитесь, что у процесса есть права на выполнение команд
+MIT — используйте свободно\!
 
-### Ошибка "command not found: claude":
-- Убедитесь, что Claude Code установлен
-- Проверьте PATH в переменных окружения
+## 🔗 Ссылки
 
-## 📝 Логи
+- **GitHub**: https://github.com/sCOSTAkg/telegram-claude-bot
+- **Telegram**: [@sCORPbot](https://t.me/sCORPbot)
+- **Документация**: [Полная документация](MASTER_REPORT.md)
 
-Логи бота сохраняются в:
-- `bot.log` - обычный вывод
-- `bot.error.log` - ошибки
+## 📞 Поддержка
 
-## 📄 Лицензия
+Если у вас есть вопросы:
+- 📖 Проверьте документацию
+- 🐛 Создайте Issue на GitHub
+- 💬 Напишите в Telegram бота
 
-ISC
+---
+
+**Версия**: 2.1.0  
+**Последнее обновление**: 2026-03-06  
+**Статус**: ✅ Production Ready
