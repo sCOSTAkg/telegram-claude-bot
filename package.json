@@ -4,7 +4,13 @@
   "description": "Telegram бот для удаленного доступа к Claude Code CLI",
   "main": "bot.js",
   "scripts": {
-    "start": "node bot.js",
+    "start": "pm2 start ecosystem.config.js",
+    "stop": "pm2 stop scorp-bot",
+    "restart": "pm2 restart scorp-bot",
+    "reload": "pm2 reload scorp-bot",
+    "status": "pm2 status scorp-bot",
+    "logs": "pm2 logs scorp-bot --lines 50",
+    "monit": "pm2 monit",
     "dev": "node bot.js"
   },
   "keywords": [
@@ -16,10 +22,12 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "dotenv": "^16.4.5",
+    "@getzep/zep-cloud": "^3.17.0",
+    "dotenv": "^16.6.1",
     "input": "^1.0.1",
     "node-telegram-bot-api": "^0.66.0",
     "puppeteer-core": "^24.37.3",
-    "telegram": "^2.26.22"
+    "telegram": "^2.26.22",
+    "undici": "^7.22.0"
   }
 }

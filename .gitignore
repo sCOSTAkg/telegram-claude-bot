@@ -1,7 +1,74 @@
+# Dependencies
 node_modules/
+package-lock.json
+
+# Environment
 .env
-*.log
-.DS_Store
+.env.local
+.env.*.local
+
+# Bot PID files
+bot.pid
+bot*.pid
+*.pid
+
+# Config and user data (sensitive)
 config.json
 users.json
-bot.pid
+local_memory.json
+
+# Logs
+*.log
+npm-debug.log*
+nohup.out
+action-log.jsonl
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Backups
+*.backup.js
+*.backup
+*.bak
+*.tmp
+*[0-9].js
+*[0-9].pid
+
+# Build outputs
+dist/
+build/
+.next/
+
+# Temporary files
+timeless_video_generation.json
+video_prompts_timeless_premium.md
+extract_script.js
+fix.js
+test*.js
+fix_*.sh
+transcribe*.js
+google_watcher*.js
+g_watch*.js
+gemini*.js
+voice_monitor*.js
+nb_*.js
+auto_healer*.js
+integrate_status*.js
+progress_tracker_examples.js
+userApi.js
+ecosystem.config.js
+package.json.bak
+nohup.out
