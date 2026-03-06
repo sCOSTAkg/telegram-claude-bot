@@ -1,32 +1,14 @@
 /**
  * Unified AI Provider Interface
- * Abstracts all AI model providers (Anthropic, OpenAI, Google, Groq)
+ * Abstracts all AI model providers (Anthropic, OpenAI, Google, Groq, DeepSeek, OpenRouter, Ollama)
+ * Uses canonical MODEL_MAP from config/models.js — no duplicates
  */
 
 const { spawn } = require('child_process');
 const os = require('os');
+const { MODEL_MAP } = require('../../config/models');
 
-const MODEL_MAP = {
-  'claude-sonnet': 'claude-sonnet-4-6-20250514',
-  'claude-opus': 'claude-opus-4-6',
-  'claude-haiku': 'claude-haiku-4-5-20251001',
-  'gemini-cli': 'gemini-cli',
-  'gpt-5.2': 'gpt-5.2',
-  'gpt-4.1': 'gpt-4.1',
-  'gpt-4.1-mini': 'gpt-4.1-mini',
-  'codex': 'codex-mini-latest',
-  'gpt-5-codex': 'gpt-5-codex',
-  'gemini-2.5-pro': 'gemini-2.5-pro',
-  'gemini-2.5-flash': 'gemini-2.5-flash',
-  'gemini-2.5-flash-lite': 'gemini-2.5-flash-lite',
-  'gemini-3.1-pro-tools': 'gemini-3.1-pro-preview-customtools',
-  'gemini-3.1-pro-preview-customtools': 'gemini-3.1-pro-preview-customtools',
-  'llama3-70b': 'llama3-70b-8192',
-  'llama3-8b': 'llama3-8b-8192',
-  'mixtral-8x7b': 'mixtral-8x7b-32768',
-};
-
-const GEMINI_THINKING_MODELS = ['gemini-2.5-pro', 'gemini-3.1-pro-preview', 'gemini-3.1-pro-preview-customtools'];
+const GEMINI_THINKING_MODELS = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-pro-preview-customtools', 'gemini-3-flash-preview'];
 
 class AIProvider {
   constructor(options = {}) {
@@ -38,9 +20,15 @@ class AIProvider {
   getProvider(model) {
     if (model.startsWith('claude')) return 'anthropic';
     if (model === 'gemini-cli') return 'google-cli';
+    if (model.startsWith('codex-cli')) return 'codex-cli';
     if (model.startsWith('gpt') || model.startsWith('codex')) return 'openai';
     if (model.startsWith('gemini')) return 'google';
+    if (model.startsWith('deepseek')) return 'deepseek';
+    if (model.startsWith('ollama-')) return 'ollama';
     if (['llama', 'mixtral', 'gemma'].some(m => model.includes(m))) return 'groq';
+    // OpenRouter models contain '/' in mapped ID
+    const mapped = MODEL_MAP[model] || model;
+    if (mapped.includes('/')) return 'openrouter';
     return 'unknown';
   }
 
@@ -72,6 +60,15 @@ class AIProvider {
           break;
         case 'groq':
           result = await this.callGroq(modelId, messages, systemPrompt, { chatId, timeout });
+          break;
+        case 'deepseek':
+          result = await this.callDeepSeek(modelId, messages, systemPrompt, { chatId, timeout });
+          break;
+        case 'openrouter':
+          result = await this.callOpenRouter(modelId, messages, systemPrompt, { chatId, timeout });
+          break;
+        case 'ollama':
+          result = await this.callOllama(modelId, messages, systemPrompt, { chatId, timeout });
           break;
         default:
           throw new Error(`Unknown provider: ${model}`);
@@ -132,13 +129,21 @@ class AIProvider {
     if (systemPrompt) msgs.push({ role: 'system', content: systemPrompt });
     msgs.push(...messages);
 
+    const isReasoning = /^(o[134]|o[134]-mini)/.test(modelId);
+    const body = { model: modelId, messages: msgs };
+    if (isReasoning) {
+      body.max_completion_tokens = 16384;
+    } else {
+      body.max_tokens = 8192;
+    }
+
     const res = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`,
       },
-      body: JSON.stringify({ model: modelId, messages: msgs, max_tokens: 4096 }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeout),
     });
 
@@ -159,19 +164,21 @@ class AIProvider {
       parts: [{ text: m.content }],
     }));
 
-    const genConfig = { maxOutputTokens: 4096 };
-    if (GEMINI_THINKING_MODELS.includes(modelId)) {
-      genConfig.thinkingConfig = { thinkingBudget: 4096 };
+    const isThinking = GEMINI_THINKING_MODELS.includes(modelId);
+    const isFlashThinking = isThinking && modelId.includes('flash');
+    const genConfig = { maxOutputTokens: isThinking ? (isFlashThinking ? 8192 : 16384) : 8192 };
+    if (isThinking) {
+      genConfig.thinkingConfig = { thinkingBudget: isFlashThinking ? 2048 : 8192 };
     }
 
     const body = { contents, generationConfig: genConfig };
     if (systemPrompt) body.systemInstruction = { parts: [{ text: systemPrompt }] };
 
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(timeout),
       }
@@ -188,7 +195,7 @@ class AIProvider {
   }
 
   async callGroq(modelId, messages, systemPrompt, opts) {
-    const { timeout = Math.min(opts.timeout || this.defaultTimeout, 60000) } = opts;
+    const { timeout = Math.min(opts.timeout || this.defaultTimeout, 90000) } = opts;
     const apiKey = process.env.GROQ_API_KEY;
     if (!apiKey) throw new Error('GROQ_API_KEY not set');
 
@@ -202,7 +209,7 @@ class AIProvider {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`,
       },
-      body: JSON.stringify({ model: modelId, messages: msgs, max_tokens: 4096 }),
+      body: JSON.stringify({ model: modelId, messages: msgs, max_tokens: 8192 }),
       signal: AbortSignal.timeout(timeout),
     });
 
@@ -211,6 +218,83 @@ class AIProvider {
     const text = data.choices?.[0]?.message?.content;
     if (!text) throw new Error('Empty response');
     return { text, usage: data.usage };
+  }
+
+  async callDeepSeek(modelId, messages, systemPrompt, opts) {
+    const { timeout = this.defaultTimeout } = opts;
+    const apiKey = process.env.DEEPSEEK_API_KEY;
+    if (!apiKey) throw new Error('DEEPSEEK_API_KEY not set');
+
+    const msgs = [];
+    if (systemPrompt) msgs.push({ role: 'system', content: systemPrompt });
+    msgs.push(...messages);
+
+    const res = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({ model: modelId, messages: msgs, max_tokens: 8192 }),
+      signal: AbortSignal.timeout(timeout),
+    });
+
+    const data = await res.json();
+    if (data.error) throw new Error(data.error.message);
+    const text = data.choices?.[0]?.message?.content;
+    if (!text) throw new Error('Empty response');
+    return { text, usage: data.usage };
+  }
+
+  async callOpenRouter(modelId, messages, systemPrompt, opts) {
+    const { timeout = this.defaultTimeout } = opts;
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (!apiKey) throw new Error('OPENROUTER_API_KEY not set');
+
+    const msgs = [];
+    if (systemPrompt) msgs.push({ role: 'system', content: systemPrompt });
+    msgs.push(...messages);
+
+    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({ model: modelId, messages: msgs, max_tokens: 8192 }),
+      signal: AbortSignal.timeout(timeout),
+    });
+
+    const data = await res.json();
+    if (data.error) throw new Error(data.error.message);
+    const text = data.choices?.[0]?.message?.content;
+    if (!text) throw new Error('Empty response');
+    return { text, usage: data.usage };
+  }
+
+  async callOllama(modelId, messages, systemPrompt, opts) {
+    const { timeout = Math.min(opts.timeout || this.defaultTimeout, 120000) } = opts;
+    const host = process.env.OLLAMA_HOST || 'http://localhost:11434';
+
+    const msgs = [];
+    if (systemPrompt) msgs.push({ role: 'system', content: systemPrompt });
+    msgs.push(...messages);
+
+    const res = await fetch(`${host}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: modelId, messages: msgs, stream: false }),
+      signal: AbortSignal.timeout(timeout),
+    });
+
+    if (!res.ok) {
+      const err = await res.text().catch(() => '');
+      throw new Error(`Ollama HTTP ${res.status}: ${err.slice(0, 200)}`);
+    }
+    const data = await res.json();
+    const text = data.message?.content;
+    if (!text) throw new Error('Ollama returned empty response');
+    return { text, usage: { total_duration: data.total_duration, eval_count: data.eval_count } };
   }
 
   async callGeminiCLI(modelId, messages, systemPrompt, opts) {

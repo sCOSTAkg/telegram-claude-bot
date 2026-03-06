@@ -175,10 +175,11 @@ function isModelAvailableForUser(model, chatId = null) {
 const MODEL_FALLBACK_CHAIN = [
   'gemini-2.5-pro',
   'gemini-2.5-flash',
-  'llama3-70b',
+  'llama-3.3-70b-versatile',
   'deepseek-chat',
   'llama-4-maverick',
   'claude-haiku',
+  'gpt-4.1-mini',
 ];
 
 function getAvailableFallbackChain(chatId, excludeModel = null) {
@@ -295,34 +296,42 @@ function autoSelectModel(text, autoMap = {}, conversationHistory = []) {
   // Scoring system — каждая категория набирает очки, побеждает максимум
   const scores = { code: 0, math: 0, translate: 0, analysis: 0, creative: 0, quick: 0, general: 1 };
 
-  // Код
-  if (/\```|`[^`]+`|=>|console\.|print\(/.test(text)) scores.code += 5;
-  if (/function\s|class\s|const\s|let\s|var\s|import\s|def\s|return\s|\.(js|ts|py|jsx|tsx|html|css|sql|sh|json|yaml)\b|npm\s|git\s|docker|api\s|endpoint|база данн|database|сервер|бэкенд|фронтенд|backend|frontend/.test(t)) scores.code += 3;
-  if (/напиши код|напиши скрипт|напиши функ|write code|write a function|create a script|debug|отлад|исправь (баг|ошибк|код)|fix (bug|code)|реализуй|implement/.test(t)) scores.code += 4;
+  // Код — расширенные паттерны
+  if (/\```|`[^`]+`|=>|console\.|print\(|\.then\(|async\s|await\s/.test(text)) scores.code += 5;
+  if (/function\s|class\s|const\s|let\s|var\s|import\s|def\s|return\s|\.(js|ts|py|jsx|tsx|html|css|sql|sh|json|yaml|go|rs|cpp|java|rb|php|swift|kt)\b|npm\s|git\s|docker|api\s|endpoint|база данн|database|сервер|бэкенд|фронтенд|backend|frontend|webpack|vite|next\.?js|react|vue|angular|express|django|flask|fastapi/.test(t)) scores.code += 3;
+  if (/напиши код|напиши скрипт|напиши функ|write code|write a function|create a script|debug|отлад|исправь (баг|ошибк|код)|fix (bug|code)|реализуй|implement|refactor|рефактор|оптимизируй код|деплой|deploy|собери проект|build project/.test(t)) scores.code += 4;
+  // Код: паттерны файлов/путей
+  if (/[\/\\]\w+\.(js|ts|py|go|rs|json|yaml|md|html|css)/.test(text)) scores.code += 2;
 
-  // Математика
-  if (/посчитай|вычисли|калькул|формул|уравнен|интеграл|производн|матриц|математик|логическ|алгоритм/.test(t)) scores.math += 5;
+  // Математика — расширенные паттерны
+  if (/посчитай|вычисли|калькул|формул|уравнен|интеграл|производн|матриц|математик|логическ|алгоритм|статистик|вероятност|теорем|доказа|regression|корреляц|дисперси/.test(t)) scores.math += 5;
   if (/\d+[\s]*[+\-*/^]\s*\d+/.test(t)) scores.math += 3;
+  if (/процент|percentage|средн.*арифм|медиан|мода|sigma|дельта/.test(t)) scores.math += 2;
 
-  // Перевод
+  // Перевод — расширенные языки
   if (/^(переведи|translate|перевод|переведите|переведём)/i.test(t)) scores.translate += 6;
-  if (/на (английский|русский|немецкий|французский|испанский|китайский|японский|корейский|арабский)|to (english|russian|german|french|spanish)/i.test(t)) scores.translate += 3;
+  if (/на (английский|русский|немецкий|французский|испанский|китайский|японский|корейский|арабский|итальянский|португальский|турецкий|хинди|иврит)|to (english|russian|german|french|spanish|chinese|japanese|korean|arabic|italian|portuguese|turkish)/i.test(t)) scores.translate += 3;
+  if (/локализ|localize|i18n|l10n/.test(t)) scores.translate += 3;
 
-  // Анализ — градиентный бонус за длину вместо бинарного
-  if (/проанализируй|анализ|разбери|объясни подробно|детально|сравни|исследуй|рассмотри|оцени|review|analyze|explain in detail/.test(t)) scores.analysis += 5;
+  // Анализ — градиентный бонус за длину + расширенные триггеры
+  if (/проанализируй|анализ|разбери|объясни подробно|детально|сравни|исследуй|рассмотри|оцени|review|analyze|explain in detail|breakdown|декомпозиц|аудит|audit|отчёт|report|обзор|overview|дайджест|digest/.test(t)) scores.analysis += 5;
   if (len > 800) scores.analysis += 3;
   else if (len > 500) scores.analysis += 2;
   else if (len > 300) scores.analysis += 1;
+  // Анализ: вставленный текст/данные (цитаты, логи, таблицы)
+  if (/\n.*\n.*\n.*\n/.test(text) && len > 200) scores.analysis += 2;
 
-  // Креатив — disambiguate с кодом
-  if (/напиши|сочини|придумай|создай текст|статью|пост|рассказ|стих|сценарий|письмо|резюме|эссе|story|write|compose/.test(t)) scores.creative += 4;
+  // Креатив — disambiguate с кодом, расширенные триггеры
+  if (/напиши|сочини|придумай|создай текст|статью|пост|рассказ|стих|сценарий|письмо|резюме|эссе|story|write|compose|копирайт|copywriting|заголов|headline|слоган|контент.?план/.test(t)) scores.creative += 4;
   if (scores.code >= 3 && /напиши/.test(t)) scores.creative -= 2;
+  // Креатив: уточнение — если есть "код" рядом с "напиши", это код
+  if (/напиши.{0,20}(код|скрипт|функц|класс|компонент|api|бот|сервер|програм)/.test(t)) { scores.creative -= 3; scores.code += 2; }
 
   // Быстрый — обнуляется при наличии код/мат сигналов
-  if (/^(привет|здравствуй|хай|ку|хей|спасибо|ок|да|нет|понял|ладно|hi|hello|hey|thanks|ok|yes|no)$/i.test(t.trim())) scores.quick += 6;
+  if (/^(привет|здравствуй|хай|ку|хей|спасибо|ок|да|нет|понял|ладно|hi|hello|hey|thanks|ok|yes|no|good|хорошо|отлично|го|пок|бб|bye)$/i.test(t.trim())) scores.quick += 6;
   if (len < 30) scores.quick += 3;
   else if (len < 80) scores.quick += 1;
-  if (scores.code >= 3 || scores.math >= 3) scores.quick = 0;
+  if (scores.code >= 3 || scores.math >= 3 || scores.analysis >= 3) scores.quick = 0;
 
   // Усиленный контекст из истории диалога (до +3 за категорию)
   if (conversationHistory.length > 0) {
@@ -418,7 +427,7 @@ function analyzeRequest(chatId, text, complexity = 'medium') {
     analysis: ['claude-sonnet', 'gemini-2.5-pro', 'gpt-4.1'],
     creative: ['claude-sonnet', 'gpt-4.1', 'gemini-2.5-flash'],
     translate: ['gemini-2.5-flash', 'claude-haiku', 'gpt-4.1-mini'],
-    quick: ['claude-haiku', 'gemini-2.5-flash', 'llama3-70b'],
+    quick: ['claude-haiku', 'gemini-2.5-flash', 'llama-3.3-70b-versatile'],
     general: ['claude-sonnet', 'gemini-2.5-flash', 'gpt-4.1'],
   };
 
@@ -597,9 +606,16 @@ async function callOpenAI(modelId, messages, systemPrompt, chatId) {
   if (systemPrompt) msgs.push({ role: 'system', content: systemPrompt });
   msgs.push(...messages);
   const settings = uc.modelSettings?.[modelId] || {};
-  const maxTokens = settings.maxTokens !== undefined ? settings.maxTokens : 4096;
-  const body = { model: modelId, messages: msgs, max_tokens: maxTokens };
-  if (settings.temperature !== undefined) body.temperature = settings.temperature;
+  const isReasoningModel = /^(o[134]|o[134]-mini)/.test(modelId);
+  const defaultMaxTokens = isReasoningModel ? 16384 : 8192;
+  const maxTokens = settings.maxTokens !== undefined ? settings.maxTokens : defaultMaxTokens;
+  const body = { model: modelId, messages: msgs };
+  if (isReasoningModel) {
+    body.max_completion_tokens = maxTokens;
+  } else {
+    body.max_tokens = maxTokens;
+    if (settings.temperature !== undefined) body.temperature = settings.temperature;
+  }
 
   const res = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
@@ -698,7 +714,7 @@ async function callGroqChat(modelId, messages, systemPrompt, chatId) {
   if (systemPrompt) msgs.push({ role: 'system', content: systemPrompt });
   msgs.push(...messages);
   const settings = uc.modelSettings?.[modelId] || {};
-  const maxTokens = settings.maxTokens !== undefined ? settings.maxTokens : 4096;
+  const maxTokens = settings.maxTokens !== undefined ? settings.maxTokens : 8192;
   const body = { model: modelId, messages: msgs, max_tokens: maxTokens };
   if (settings.temperature !== undefined) body.temperature = settings.temperature;
 
@@ -724,7 +740,7 @@ async function callOpenRouter(modelId, messages, systemPrompt, chatId) {
   if (systemPrompt) msgs.push({ role: 'system', content: systemPrompt });
   msgs.push(...messages);
   const settings = uc.modelSettings?.[modelId] || {};
-  const maxTokens = settings.maxTokens !== undefined ? settings.maxTokens : 4096;
+  const maxTokens = settings.maxTokens !== undefined ? settings.maxTokens : 8192;
   const body = { model: modelId, messages: msgs, max_tokens: maxTokens };
   if (settings.temperature !== undefined) body.temperature = settings.temperature;
 
@@ -6337,44 +6353,81 @@ function buildFramesContextPrompt(chatId) {
 
 const AGENT_SYSTEM_PROMPT = `You are an AI assistant capable of EXECUTING actions on the user's server. You don't just advise — you act.
 
-## 🧠 Deductive Reasoning — ALWAYS analyze before acting
+## 🧠 Chain-of-Thought Reasoning — THINK FAST, ACT SMART
 
-BEFORE ACTING, determine:
-1. **Intent**: what does the user want? (create / fix / explain / research / verify)
-2. **Tools**: what actions are needed? → choose from the list below
-3. **Roles**: who to delegate to? → coder / researcher / reviewer / writer / devops, etc.
-4. **Complexity**: simple question → answer immediately; complex task → plan
+For EVERY request, run this mental pipeline (do NOT write it out — just apply internally):
 
-### Planning Rule (for medium/complex/very_complex tasks):
-- Step 1 → [ACTION: think] — analysis: what is needed, how to do it, what subtasks
-- Step 2 → [ACTION: plan] — decompose into subtasks with roles and dependencies
-- Step 3 → [ACTION: execute_plan] or [ACTION: parallel] — parallel execution
+**Step 1 — CLASSIFY** (instant):
+- Greeting/simple question → answer directly, no actions
+- Single action (draw/run/remind) → execute immediately
+- Multi-step task → plan first
+- Ambiguous request → clarify with ONE question
 
-### Auto-selection of tools:
-- System task (install/run/check/files) → [ACTION: bash]
-- Write/fix code → [ACTION: delegate] role=coder
-- Code + quality check → delegate coder, then delegate reviewer
-- Research/analyze → [ACTION: delegate] researcher or [ACTION: parallel]
-- Multiple independent tasks → [ACTION: parallel]
-- Complex task with dependencies → [ACTION: plan] + [ACTION: execute_plan]
-- Need to compare options / get the best answer → [ACTION: council]
+**Step 2 — INTENT** (what does the user REALLY want?):
+- CREATE: build something new (code, image, video, project, text)
+- FIX: repair/debug/correct something existing
+- EXPLAIN: understand/learn/analyze
+- RESEARCH: find information, compare options, investigate
+- TRANSFORM: convert/translate/edit/modify existing content
+- AUTOMATE: schedule, remind, background tasks
 
-IMPORTANT: The user communicates in NATURAL LANGUAGE. There are no commands. Determine the intent and execute the action:
+**Step 3 — OPTIMAL TOOL** (choose the FASTEST path):
+- Direct answer possible? → Answer without actions (fastest)
+- System command needed? → [ACTION: bash] (2-30s)
+- Code task? → [ACTION: delegate] role=coder (30-90s)
+- Media generation? → [ACTION: image] or [ACTION: video] (2-120s)
+- Research needed? → [ACTION: delegate] researcher (30-60s)
+- Multiple independent tasks? → [ACTION: parallel] (30-90s, FASTEST for multi-task)
+- Need best answer from multiple perspectives? → [ACTION: council]
+- Complex project? → [ACTION: plan] → [ACTION: execute_plan]
 
-- "draw/generate picture/photo/image..." → [ACTION: image]
-- "edit/modify/change uploaded photo (background/color/add/remove)..." → [ACTION: image_edit]
-- "make video/shoot/animate..." → [ACTION: video]
-- "extend/continue video..." → [ACTION: video_extend]
-- "remind in.../set reminder/alarm..." → [ACTION: remind]
-- "add task/note task/todo..." → [ACTION: todo]
-- "search internet/google/search..." → use your knowledge or [ACTION: bash] curl
-- "run/execute command..." → [ACTION: bash]
-- "send file/show file..." → [ACTION: file]
-- "schedule in.../in N hours do..." → [ACTION: schedule]
-- "delegate/ask agent..." → [ACTION: delegate]
+**Step 4 — EXECUTE** with minimal overhead:
+- Simple → 1 action, done
+- Medium → delegate or parallel (2-3 agents max)
+- Complex → plan → parallel + sequential deps → synthesize
+
+### SPEED RULES (critical):
+- Do NOT use [ACTION: think] before simple tasks — just do them
+- Do NOT delegate greetings, yes/no questions, or factual answers
+- Launch parallel/council IMMEDIATELY — no preliminary think step
+- One planning step MAX before execution — avoid analysis paralysis
+- If you can answer in 1 sentence without actions — DO THAT
+
+IMPORTANT: The user communicates in NATURAL LANGUAGE. There are no commands. Map intent → action:
+
+**Media Creation:**
+- "draw/generate/create picture/photo/image/illustration/logo/banner/icon..." → [ACTION: image]
+- "edit/modify/change uploaded photo (background/color/add/remove/retouch)..." → [ACTION: image_edit]
+- "make video/shoot/animate/record/clip/reel..." → [ACTION: video]
+- "extend/continue/prolong video..." → [ACTION: video_extend]
+- "scenario/storyboard/script for video..." → [ACTION: delegate] role=content_creator
+
+**Tasks & Scheduling:**
+- "remind in.../set reminder/alarm/notification..." → [ACTION: remind]
+- "add task/note task/todo/to-do list..." → [ACTION: todo]
+- "schedule in.../in N hours do.../run later..." → [ACTION: schedule]
+- "run in background/do in background/async..." → [ACTION: background]
+
+**Code & System:**
+- "run/execute command/install/deploy/check..." → [ACTION: bash]
+- "write code/create app/build project/fix bug/debug..." → [ACTION: delegate] role=coder
+- "review code/check quality/find bugs..." → [ACTION: delegate] role=reviewer
+- "create website/landing/app/frontend..." → [ACTION: plan] → multi-agent
+
+**Knowledge & Files:**
+- "search internet/google/find info/research..." → [ACTION: delegate] researcher or use knowledge
+- "send file/show file/give me..." → [ACTION: file]
+- "analyze/research/report/compare..." → [ACTION: parallel] or [ACTION: council]
+- "translate/перевод/на английский..." → [ACTION: delegate] role=translator
+
+**Memory:**
 - "forget that.../delete from memory..." → [ACTION: memory] forget
-- "what do you remember about me/show memory..." → [ACTION: memory] list
-- "run in background/do in background..." → [ACTION: background]
+- "what do you remember/show memory..." → [ACTION: memory] list
+
+**Meta / Complex:**
+- "do X and Y and Z" (multiple tasks) → [ACTION: parallel]
+- "what's better: A or B?" (comparison) → [ACTION: council]
+- "create project with..." (multi-step) → [ACTION: plan] → [ACTION: execute_plan]
 
 Never say "use the /... command". Just do it.
 
@@ -6713,26 +6766,39 @@ Subagent selection by task:
 - Social media → social_media
 
 Rules:
-1. ALWAYS delegate — you are an orchestrator, not a performer
-2. Before a complex task — use [ACTION: plan] for decomposition
-3. Independent subtasks (without deps) — launch via [ACTION: parallel] (each agent will automatically get ITS OWN model!)
-4. Dependent ones — via sequential [ACTION: delegate]
-5. Need a narrow specialist — create via [ACTION: create_agent]
-6. For control — [ACTION: supervise]
-7. Maximum 8 agents in parallel, timeout 90s per agent. Each will get ITS OWN model
-8. After parallel — analyze results and synthesize the output
-9. For simple questions without actions (hi, how are you, what is X) — answer yourself, without delegating
-10. For analytics/opinions — use [ACTION: council] for a multi-model meeting
-11. SPEED IS PARAMOUNT: do NOT waste steps on reflections before simple actions, just do it
+1. ALWAYS delegate work tasks — you are an orchestrator, not a performer
+2. EXCEPTION: simple questions (hi, what is X, yes/no) — answer yourself without delegating
+3. Before a complex task — use [ACTION: plan] for decomposition
+4. Independent subtasks — launch via [ACTION: parallel] (each agent auto-gets ITS OWN model!)
+5. Dependent subtasks — via sequential [ACTION: delegate]
+6. Need a narrow specialist — create via [ACTION: create_agent]
+7. For control — [ACTION: supervise]
+8. Maximum 8 agents in parallel, timeout 90s per agent
+9. After parallel — ALWAYS synthesize results into a coherent answer
+10. For analytics/opinions/comparisons — [ACTION: council] for multi-model voting
+11. SPEED IS PARAMOUNT: do NOT waste steps on reflections before simple actions
+12. NEVER delegate image/video/remind/schedule/todo/memory — execute those DIRECTLY
+13. If user asks "do X AND Y" — launch parallel immediately, don't ask clarification
 
 ## Context Understanding and Self-Improvement
 
-- **Dialog Context**: If the request is short or contains pronouns ("this", "him", "to Russian"), always consider previous messages. Do not answer in isolation.
+- **Dialog Context**: If the request is short or contains pronouns ("this", "him", "to Russian"), ALWAYS consider previous messages. Do not answer in isolation.
+- **Implicit Intent**: "продолжай"/"continue" = continue the LAST task. "ещё"/"more" = generate another variant. "другой"/"different" = change approach.
 - **User Corrections**: If the user says "no", "not like that", "I meant..." — this is a LEARNING SIGNAL. Correct your understanding and remember the lesson.
 - **Preferences**: Remember the user's communication style (concise/detailed, formal/conversational) and adapt.
 - **Negative Feedback**: If the user is dissatisfied ("wrong", "bad", "don't do that") — extract the instruction and correct your behavior.
 - **Memory**: You have access to long-term memory about the user. Instructions from memory (category: instruction) have TOP PRIORITY — always follow them.
 - **Result**: NEVER answer with an empty "Task completed" without a result. Always show the concrete result of an action.
+
+## Response Quality Guidelines
+
+1. **Be concise**: Lead with the answer or result, not the reasoning. 5-15 words before ACTION.
+2. **Be specific**: "Created file server.js with Express on port 3000" not "The task has been completed".
+3. **Be structured**: For lists/comparisons use formatting. For code — delegate to coder.
+4. **Be proactive**: If a request implies follow-up steps, mention them. "File created. Want me to deploy it?"
+5. **Handle errors gracefully**: On error, show what went wrong and what you're doing differently.
+6. **Match language**: ALWAYS respond in the user's language. If they write in Russian — respond in Russian.
+7. **No filler**: Never start with "Certainly!", "Of course!", "Sure!" — go straight to the point.
 
 ## CRITICAL RULE: Never give up
 
@@ -9072,8 +9138,14 @@ async function validateResponseWithAgent(userQuery, aiResponse, chatId) {
 }
 
 async function runClaude(chatId, text) {
-  const releaseLock = await acquireChatLock(chatId);
-  try { return await _runClaudeInner(chatId, text); } finally { releaseLock(); }
+  // Параллельное выполнение: без chatLock, задачи запускаются одновременно
+  // Typing indicator: непрерывный "печатает..." пока идёт обработка
+  const typingInterval = setInterval(() => {
+    tgApi('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {});
+  }, 4000);
+  // Первый typing сразу
+  tgApi('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {});
+  try { return await _runClaudeInner(chatId, text); } finally { clearInterval(typingInterval); }
 }
 async function _runClaudeInner(chatId, text) {
   const uc = getUserConfig(chatId);
@@ -10826,8 +10898,11 @@ async function processUpdate(upd) {
   }
 
   if (currentFgCount > 0) {
-    send(chatId, `▶️ Запускаю параллельно (${currentFgCount + 1}/${MAX_CONCURRENT_TASKS_PER_USER})`).then(r => autoDeleteMsg(chatId, r?.result?.message_id));
+    send(chatId, `⚡ Запускаю параллельно (${currentFgCount + 1}/${MAX_CONCURRENT_TASKS_PER_USER}) — обрабатываю одновременно`).then(r => autoDeleteMsg(chatId, r?.result?.message_id, 5000));
   }
+
+  // Typing indicator для пользователя пока идёт обработка
+  tgApi('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {});
 
   // Zep + local memory: prefetch context
   zepMemory.prefetchContext(chatId, text).catch(() => { });
