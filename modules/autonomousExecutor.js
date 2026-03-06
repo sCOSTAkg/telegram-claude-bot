@@ -389,7 +389,10 @@ Respond with ONLY valid JSON (no markdown, no explanation):
     try {
       const dir = path.join(this.persistDir, String(chatId));
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(path.join(dir, `${taskId}.json`), JSON.stringify(plan, null, 2));
+      const targetPath = path.join(dir, `${taskId}.json`);
+      const tmpPath = targetPath + '.tmp';
+      fs.writeFileSync(tmpPath, JSON.stringify(plan, null, 2));
+      fs.renameSync(tmpPath, targetPath);
     } catch (e) {
       console.error(`[AutonomousExecutor] Save error: ${e.message}`);
     }

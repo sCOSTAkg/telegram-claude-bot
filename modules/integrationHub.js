@@ -250,6 +250,7 @@ Return JSON:
       if (!fetchOpts.headers['Content-Type']) fetchOpts.headers['Content-Type'] = 'application/json';
     }
 
+    fetchOpts.signal = AbortSignal.timeout(30000);
     const resp = await fetch(targetUrl, fetchOpts);
     const contentType = resp.headers.get('content-type') || '';
     const body = contentType.includes('json') ? await resp.json() : await resp.text();
@@ -306,11 +307,27 @@ Return JSON:
     return { error: `Unknown action: ${action}` };
   }
 
+  _sanitizeConfig(config) {
+    const SENSITIVE_KEYS = /^(token|apiKey|api_key|secret|pass|password|credentials|connectionString|botToken|auth)$/i;
+    const sanitized = {};
+    for (const [key, val] of Object.entries(config)) {
+      if (SENSITIVE_KEYS.test(key)) {
+        sanitized[key] = '***REDACTED***';
+      } else if (typeof val === 'object' && val !== null && !Array.isArray(val)) {
+        sanitized[key] = this._sanitizeConfig(val);
+      } else {
+        sanitized[key] = val;
+      }
+    }
+    return sanitized;
+  }
+
   async _executeGenericIntegration(integration, action, params, chatId) {
+    const sanitizedConfig = this._sanitizeConfig(integration.config);
     const prompt = `Execute this integration action and return the result as a bash command or API call.
 
 Integration: ${integration.name} (${integration.type})
-Config: ${JSON.stringify(integration.config)}
+Config: ${JSON.stringify(sanitizedConfig)}
 Action: ${action}
 Params: ${JSON.stringify(params)}
 

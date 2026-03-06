@@ -44,7 +44,7 @@ class SkillManager {
                 this.skills.set(id, { ...skillModule.meta, type: 'file', file, loaded: true });
               }
             }
-          } catch (e) { /* skip broken skills */ }
+          } catch (e) { console.warn(`[SkillManager] Failed to load skill ${file}: ${e.message}`); }
         }
       }
     } catch (e) {
@@ -209,8 +209,14 @@ Return JSON:
 
     // If it's a file-based skill, execute its module
     if (skill.type === 'file' && skill.file) {
+      let skillModule;
       try {
-        const skillModule = require(path.join(SKILLS_DIR, skill.file));
+        skillModule = require(path.join(SKILLS_DIR, skill.file));
+      } catch (loadErr) {
+        this._recordExecution(skillId, false, Date.now() - startTime);
+        return { success: false, error: `Failed to load skill module ${skill.file}: ${loadErr.message}` };
+      }
+      try {
         const output = await skillModule.execute(params, { chatId, callAI: this.callAI, executeAction: this.executeAction });
         this._recordExecution(skillId, true, Date.now() - startTime);
         return { success: true, output, duration: Date.now() - startTime };

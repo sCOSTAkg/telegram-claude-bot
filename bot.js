@@ -3263,7 +3263,8 @@ async function processSmartSetup(chatId, description) {
     // Извлекаем JSON из ответа
     const jsonMatch = stdout.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error('No JSON');
-    const parsed = JSON.parse(jsonMatch[0]);
+    let parsed;
+    try { parsed = JSON.parse(jsonMatch[0]); } catch (e) { throw new Error('Invalid JSON from AI: ' + e.message); }
 
     if (!parsed.channels || !Array.isArray(parsed.channels) || parsed.channels.length === 0) {
       send(chatId, '❌ Не удалось определить каналы. Укажите @username канала в описании.');
@@ -5722,12 +5723,12 @@ async function nbDirectGenerate(chatId, msgId, nbId, toolName, extraArgs, emoji,
                 const filePath = `/tmp/nb_${Date.now()}.${ext}`;
                 const fileRes = await fetch(url, { signal: AbortSignal.timeout(60000) });
                 const buf = Buffer.from(await fileRes.arrayBuffer());
-                fs.writeFileSync(filePath, buf);
+                await fs.promises.writeFile(filePath, buf);
                 if (['mp3', 'wav', 'ogg', 'm4a'].includes(ext)) await sendAudio(chatId, filePath, label);
                 else if (['mp4', 'webm', 'mov'].includes(ext)) await sendVideo(chatId, filePath, label);
                 else if (['png', 'jpg', 'jpeg'].includes(ext)) await sendPhoto(chatId, filePath, label);
                 else await sendDocument(chatId, filePath);
-                try { fs.unlinkSync(filePath); } catch (e) { }
+                try { await fs.promises.unlink(filePath); } catch (e) { }
               } catch (dlErr) {
                 resultText += `\n⚠️ Не удалось скачать: ${dlErr.message}`;
               }
@@ -5908,7 +5909,7 @@ async function handleFile(chatId, msg) {
 
     // Всегда читаем imgData для фото — нужно для хранения и прямой анимации
     let imgData = null;
-    try { imgData = fs.readFileSync(destPath).toString('base64'); } catch (e) { console.warn('Photo read failed:', e.message); }
+    try { imgData = (await fs.promises.readFile(destPath)).toString('base64'); } catch (e) { console.warn('Photo read failed:', e.message); }
 
     if (imgData) {
       // Всегда сохраняем последнее загруженное фото — агент сможет использовать его
@@ -6008,7 +6009,7 @@ async function handleFile(chatId, msg) {
     }
     const group = mediaGroupBuffer.get(groupId);
     try {
-      const imgData = fs.readFileSync(destPath).toString('base64');
+      const imgData = (await fs.promises.readFile(destPath)).toString('base64');
       group.photos.push(imgData);
       group.paths.push(destPath);
     } catch (e) { console.warn('Media group photo read failed:', e.message); }
@@ -6081,7 +6082,7 @@ async function handleFile(chatId, msg) {
     const idx = waitingSkillEditPrompt.get(chatId);
     waitingSkillEditPrompt.delete(chatId);
     try {
-      const fileContent = fs.readFileSync(destPath, 'utf8').trim();
+      const fileContent = (await fs.promises.readFile(destPath, 'utf8')).trim();
       if (!fileContent) { send(chatId, '❌ Файл пустой'); return true; }
       if (uc.skills && uc.skills[idx]) {
         uc.skills[idx].prompt = fileContent;
@@ -6101,7 +6102,7 @@ async function handleFile(chatId, msg) {
     const name = typeof pending === 'object' ? pending.name : pending;
     const category = typeof pending === 'object' ? pending.category : 'other';
     try {
-      const fileContent = fs.readFileSync(destPath, 'utf8').trim();
+      const fileContent = (await fs.promises.readFile(destPath, 'utf8')).trim();
       if (!fileContent) { send(chatId, '❌ Файл пустой'); return true; }
       if (!uc.skills) uc.skills = [];
       uc.skills.push({ name, prompt: fileContent, description: '', category, uses: 0, lastUsed: null });
@@ -6118,7 +6119,7 @@ async function handleFile(chatId, msg) {
     const agentData = waitingAgentPrompt.get(chatId);
     waitingAgentPrompt.delete(chatId);
     try {
-      const fileContent = fs.readFileSync(destPath, 'utf8').trim();
+      const fileContent = (await fs.promises.readFile(destPath, 'utf8')).trim();
       if (!fileContent) { send(chatId, '❌ Файл пустой'); return true; }
       if (!uc.customAgents) uc.customAgents = [];
       uc.customAgents.push({ id: agentData.id, icon: agentData.icon || '🤖', label: agentData.label, desc: agentData.desc || '', prompt: fileContent, maxSteps: 3, model: '', enabled: true, uses: 0, lastUsed: null });
@@ -6135,7 +6136,7 @@ async function handleFile(chatId, msg) {
     const idx = waitingAgentEditPrompt.get(chatId);
     waitingAgentEditPrompt.delete(chatId);
     try {
-      const fileContent = fs.readFileSync(destPath, 'utf8').trim();
+      const fileContent = (await fs.promises.readFile(destPath, 'utf8')).trim();
       if (!fileContent) { send(chatId, '❌ Файл пустой'); return true; }
       if (uc.customAgents && uc.customAgents[idx]) {
         uc.customAgents[idx].prompt = fileContent;
@@ -6175,7 +6176,7 @@ async function transcribeVoice(filePath, chatId = null) {
   if (!key) return { text: null, error: 'Нет Gemini API ключа для транскрипции' };
 
   try {
-    const audioData = fs.readFileSync(filePath).toString('base64');
+    const audioData = (await fs.promises.readFile(filePath)).toString('base64');
     const ext = path.extname(filePath).slice(1).toLowerCase();
     const mimeMap = { ogg: 'audio/ogg', oga: 'audio/ogg', mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav', aac: 'audio/aac', opus: 'audio/opus' };
     const mimeType = mimeMap[ext] || 'audio/ogg';
@@ -7010,7 +7011,7 @@ function executeBashAction(cmd, workDir) {
 }
 
 // Автоотправка файлов, упомянутых в тексте ответа, в Telegram
-function autoSendMentionedFiles(chatId, text) {
+async function autoSendMentionedFiles(chatId, text) {
   if (!text) return;
   const pathRegex = /(\/[\w./-]+\.(?:png|jpg|jpeg|gif|webp|mp4|mov|webm|pdf|html|csv|json|txt|md|zip|tar|gz|svg|mp3|wav|ogg|m4a))/gi;
   const matches = text.match(pathRegex);
@@ -7021,13 +7022,13 @@ function autoSendMentionedFiles(chatId, text) {
     if (seen.has(clean)) continue;
     seen.add(clean);
     try {
-      if (!fs.existsSync(clean)) continue;
+      await fs.promises.access(clean, fs.constants.R_OK);
       const ext = path.extname(clean).slice(1).toLowerCase();
       if (['mp4', 'webm', 'mov'].includes(ext)) sendVideo(chatId, clean, path.basename(clean));
       else if (['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext)) sendPhoto(chatId, clean, path.basename(clean));
       else if (['mp3', 'wav', 'ogg', 'm4a'].includes(ext)) sendAudio(chatId, clean, path.basename(clean));
       else sendDocument(chatId, clean, path.basename(clean));
-    } catch (e) { console.error(`autoSendMentionedFiles: ${e.message}`); }
+    } catch (e) { if (e.code !== 'ENOENT') console.error(`autoSendMentionedFiles: ${e.message}`); }
   }
 }
 
@@ -7195,16 +7196,15 @@ async function executeSearchAction(query, chatId) {
   }
 }
 
-function executeFileAction(chatId, filePath) {
+async function executeFileAction(chatId, filePath) {
   const uc = getUserConfig(chatId);
-  // Берём только первую строку как путь (защита от конкатенации контента с путём)
   const cleanPath = filePath.split('\n')[0].trim();
   const resolvedWorkDir = path.resolve(uc.workDir) + path.sep;
   const resolved = path.resolve(uc.workDir, cleanPath);
   if (!resolved.startsWith(resolvedWorkDir) && resolved !== path.resolve(uc.workDir)) {
     return { success: false, output: 'Доступ запрещён: файл вне рабочей директории' };
   }
-  if (!fs.existsSync(resolved)) {
+  try { await fs.promises.access(resolved, fs.constants.R_OK); } catch (_) {
     return { success: false, output: `Файл не найден: ${resolved}. Убедись, что файл создан через [ACTION: bash] перед отправкой.` };
   }
   sendDocument(chatId, resolved);
@@ -7213,7 +7213,7 @@ function executeFileAction(chatId, filePath) {
 
 // === OpenClaw-like File Tools ===
 
-function executeReadFileAction(chatId, body) {
+async function executeReadFileAction(chatId, body) {
   const lines = body.split('\n').map(l => l.trim()).filter(Boolean);
   let filePath = lines[0];
   let offset = 0;
@@ -7231,19 +7231,19 @@ function executeReadFileAction(chatId, body) {
   const sec = resolveSecurePath(chatId, filePath);
   if (sec.error) return { success: false, output: sec.error };
   const resolved = sec.resolved;
-  if (!fs.existsSync(resolved)) return { success: false, output: `Файл не найден: ${resolved}` };
-  const stat = fs.statSync(resolved);
+  let stat;
+  try { stat = await fs.promises.stat(resolved); } catch (e) { return { success: false, output: `Файл не найден: ${resolved}` }; }
   if (stat.isDirectory()) return { success: false, output: `${resolved} — директория. Используй [ACTION: bash] ls` };
   if (stat.size > 10 * 1024 * 1024) return { success: false, output: `Файл слишком большой (${(stat.size / 1024 / 1024).toFixed(1)}MB). Используй offset/limit` };
   // Binary detection
+  const fh = await fs.promises.open(resolved, 'r');
   const sample = Buffer.alloc(512);
-  const fd = fs.openSync(resolved, 'r');
-  const bytesRead = fs.readSync(fd, sample, 0, 512, 0);
-  fs.closeSync(fd);
+  const { bytesRead } = await fh.read(sample, 0, 512, 0);
+  await fh.close();
   if (sample.slice(0, bytesRead).filter(b => b === 0).length > bytesRead * 0.1) {
     return { success: false, output: `Файл бинарный (${stat.size} bytes). Отправь через [ACTION: file]` };
   }
-  const content = fs.readFileSync(resolved, 'utf-8');
+  const content = await fs.promises.readFile(resolved, 'utf-8');
   const allLines = content.split('\n');
   const totalLines = allLines.length;
   const sliced = allLines.slice(offset, offset + limit);
@@ -7254,7 +7254,7 @@ function executeReadFileAction(chatId, body) {
   return { success: true, output: truncateOutput(output) };
 }
 
-function executeWriteFileAction(chatId, body) {
+async function executeWriteFileAction(chatId, body) {
   const pathMatch = body.match(/^path:\s*(.+)/im);
   if (!pathMatch) return { success: false, output: 'write_file: требуется поле "path:"' };
   const filePath = pathMatch[1].trim();
@@ -7271,32 +7271,33 @@ function executeWriteFileAction(chatId, body) {
   }
   const dir = path.dirname(resolved);
   try {
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    const existed = fs.existsSync(resolved);
-    fs.writeFileSync(resolved, content, 'utf-8');
+    await fs.promises.mkdir(dir, { recursive: true });
+    let existed = false;
+    try { await fs.promises.access(resolved); existed = true; } catch (_) {}
+    await fs.promises.writeFile(resolved, content, 'utf-8');
     const lineCount = content.split('\n').length;
-    const stat = fs.statSync(resolved);
+    const stat = await fs.promises.stat(resolved);
     return { success: true, output: `${existed ? '✏️ Перезаписан' : '📝 Создан'}: ${resolved} (${lineCount} строк, ${stat.size} bytes)` };
   } catch (e) {
     return { success: false, output: `Ошибка записи файла: ${e.message}` };
   }
 }
 
-function executeEditFileAction(chatId, body) {
+async function executeEditFileAction(chatId, body) {
   const pathMatch = body.match(/^path:\s*(.+)/im);
   if (!pathMatch) return { success: false, output: 'edit_file: требуется поле "path:"' };
   const filePath = pathMatch[1].trim();
   const sec = resolveSecurePath(chatId, filePath);
   if (sec.error) return { success: false, output: sec.error };
   const resolved = sec.resolved;
-  if (!fs.existsSync(resolved)) return { success: false, output: `Файл не найден: ${resolved}` };
+  try { await fs.promises.access(resolved); } catch (_) { return { success: false, output: `Файл не найден: ${resolved}` }; }
   const oldMatch = body.match(/old_text:\s*\n([\s\S]*?)(?=\nnew_text:)/i);
   const newMatch = body.match(/new_text:\s*\n([\s\S]*?)$/i);
   if (!oldMatch) return { success: false, output: 'edit_file: требуется поле "old_text:"' };
   if (!newMatch) return { success: false, output: 'edit_file: требуется поле "new_text:"' };
   const oldText = oldMatch[1];
   const newText = newMatch[1];
-  let content = fs.readFileSync(resolved, 'utf-8');
+  let content = await fs.promises.readFile(resolved, 'utf-8');
   if (!content.includes(oldText)) {
     const trimmedOld = oldText.trim();
     if (trimmedOld && content.includes(trimmedOld)) {
@@ -7307,7 +7308,7 @@ function executeEditFileAction(chatId, body) {
   } else {
     content = content.replace(oldText, newText);
   }
-  fs.writeFileSync(resolved, content, 'utf-8');
+  await fs.promises.writeFile(resolved, content, 'utf-8');
   const lineCount = content.split('\n').length;
   return { success: true, output: `✅ Файл изменён: ${resolved} (${lineCount} строк)` };
 }
@@ -7583,7 +7584,7 @@ async function executeImageAction(chatId, body) {
         await sendPhoto(chatId, img.path, prompt.slice(0, 200));
         // Save generated image to sessionFrames for chaining (e.g. "draw → animate")
         try {
-          const newData = fs.readFileSync(img.path).toString('base64');
+          const newData = (await fs.promises.readFile(img.path)).toString('base64');
           if (!sessionFrames.has(chatId)) sessionFrames.set(chatId, { lastPhotos: [], lastPhotosPaths: [] });
           const frames = sessionFrames.get(chatId);
           frames.lastPhoto = newData;
@@ -7593,7 +7594,7 @@ async function executeImageAction(chatId, body) {
           frames.lastPhotos.push(newData);
           if (frames.lastPhotos.length > 10) frames.lastPhotos.shift();
         } catch (e) { /* ignore */ }
-        try { fs.unlinkSync(img.path); } catch (e) { }
+        try { await fs.promises.unlink(img.path); } catch (e) { }
       }
       const textResult = texts.map(t => t.text).join('\n').slice(0, 500);
       const fallbackNote2 = modelKey !== primaryModel ? ` (через ${IMAGE_MODELS[modelKey]?.label || modelKey})` : '';
@@ -7658,7 +7659,7 @@ async function executeImageEditAction(chatId, body) {
       for (const img of images) {
         await sendPhoto(chatId, img.path, `✏️ ${instruction.slice(0, 180)}`);
         try {
-          const editedData = fs.readFileSync(img.path).toString('base64');
+          const editedData = (await fs.promises.readFile(img.path)).toString('base64');
           if (!sessionFrames.has(chatId)) sessionFrames.set(chatId, { lastPhotos: [], lastPhotosPaths: [] });
           const frames = sessionFrames.get(chatId);
           frames.lastPhoto = editedData;
@@ -7669,7 +7670,7 @@ async function executeImageEditAction(chatId, body) {
           if (frames.lastPhotos.length > 10) frames.lastPhotos.shift();
           frames.editedPhoto = true;
         } catch (e) { /* ignore */ }
-        try { fs.unlinkSync(img.path); } catch (e) { /* ignore */ }
+        try { await fs.promises.unlink(img.path); } catch (e) { /* ignore */ }
       }
 
       return { success: true, output: photos.length > 1
@@ -8013,9 +8014,9 @@ Format: server: ${figmaServer.id}\\ntool: <tool_name>\\nargs: <JSON>`;
                     const imgPath = `/tmp/figma_design_${Date.now()}.png`;
                     const dlRes = await fetch(imgUrl, { signal: AbortSignal.timeout(30000) });
                     const buf = Buffer.from(await dlRes.arrayBuffer());
-                    fs.writeFileSync(imgPath, buf);
+                    await fs.promises.writeFile(imgPath, buf);
                     await sendPhoto(chatId, imgPath, `🎨 ${tmpl.label}: ${brief.slice(0, 100)}`);
-                    try { fs.unlinkSync(imgPath); } catch (e) { /* ignore */ }
+                    try { await fs.promises.unlink(imgPath); } catch (e) { /* ignore */ }
                   }
                 }
               }
@@ -8096,9 +8097,9 @@ async function executeFigmaAction(chatId, body) {
             const imgPath = `/tmp/figma_${Date.now()}_${nodeId.replace(/:/g, '_')}.png`;
             const imgRes = await fetch(url, { signal: AbortSignal.timeout(30000) });
             const buf = Buffer.from(await imgRes.arrayBuffer());
-            fs.writeFileSync(imgPath, buf);
+            await fs.promises.writeFile(imgPath, buf);
             await sendPhoto(chatId, imgPath, `Figma: ${nodeId}`);
-            try { fs.unlinkSync(imgPath); } catch (e) { }
+            try { await fs.promises.unlink(imgPath); } catch (e) { }
             sent++;
           }
         }
@@ -8260,7 +8261,7 @@ async function executeDelegateAction(chatId, body, statusUpdater) {
 
 // === OpenClaw-like Web Tools ===
 
-async function executeWebFetchAction(body) {
+async function executeWebFetchAction(body, chatId = null) {
   const lines = body.split('\n').map(l => l.trim()).filter(Boolean);
   let url = lines[0];
   for (const line of lines) {
@@ -8270,6 +8271,13 @@ async function executeWebFetchAction(body) {
   if (!url || (!url.startsWith('http://') && !url.startsWith('https://'))) {
     return { success: false, output: 'web_fetch: требуется валидный URL (http/https)' };
   }
+  // SSRF protection
+  try {
+    const urlObj = new URL(url);
+    if (isPrivateHost(urlObj.hostname)) {
+      return { success: false, output: 'web_fetch: запросы к локальным/приватным адресам запрещены' };
+    }
+  } catch (e) { return { success: false, output: `web_fetch: невалидный URL: ${e.message}` }; }
   try {
     const res = await fetch(url, {
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; sCORP-Bot/1.0)', 'Accept': 'text/html,application/json,text/plain,*/*' },
@@ -8564,11 +8572,11 @@ async function _executeActionInner(chatId, action, statusUpdater) {
     case 'schedule': return executeScheduleAction(chatId, action.body);
     case 'todo': return executeTodoAction(chatId, action.body);
     case 'search': return await executeSearchAction(action.body, chatId);
-    case 'file': return executeFileAction(chatId, action.body);
-    case 'read_file': return executeReadFileAction(chatId, action.body);
-    case 'write_file': return executeWriteFileAction(chatId, action.body);
-    case 'edit_file': return executeEditFileAction(chatId, action.body);
-    case 'web_fetch': return await executeWebFetchAction(action.body);
+    case 'file': return await executeFileAction(chatId, action.body);
+    case 'read_file': return await executeReadFileAction(chatId, action.body);
+    case 'write_file': return await executeWriteFileAction(chatId, action.body);
+    case 'edit_file': return await executeEditFileAction(chatId, action.body);
+    case 'web_fetch': return await executeWebFetchAction(action.body, chatId);
     case 'http_request': return await executeHttpRequestAction(chatId, action.body);
     case 'skill': return await executeSkillAction(chatId, action.body);
     case 'plan': return await executePlanAction(chatId, action.body, statusUpdater);
