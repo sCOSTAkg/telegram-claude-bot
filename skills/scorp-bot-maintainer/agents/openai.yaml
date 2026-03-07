@@ -1,0 +1,4 @@
+interface:
+  display_name: "sCORP Bot Maintainer"
+  short_description: "Manage and edit the sCORP bot codebase safely"
+  default_prompt: "Use $scorp-bot-maintainer to update and debug my sCORP bot at /Users/guest1/Desktop/sCORP."
