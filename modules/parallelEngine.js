@@ -420,7 +420,7 @@ async function executeParallelSubtasks(chatId, subtasks, pool, runSubAgentLoop, 
       }).filter(Boolean).join('\n\n');
 
       try {
-        const maxSteps = st.priority === 'high' ? 10 : st.priority === 'low' ? 4 : 7;
+        const maxSteps = st.priority === 'high' ? 20 : st.priority === 'low' ? 7 : 12;
         const result = await runSubAgentLoop(chatId, st.task, st.role, depsContext, maxSteps);
         return { idx, result };
       } catch (e) {

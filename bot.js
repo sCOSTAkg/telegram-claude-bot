@@ -19,6 +19,12 @@ const { DynamicAgentCreator } = require('./modules/dynamicAgentCreator');
 const { SkillManager } = require('./modules/skillManager');
 const { IntegrationHub } = require('./modules/integrationHub');
 const { Orchestrator } = require('./modules/orchestrator');
+const { BrowserManager } = require('./modules/browserManager');
+const { ChromeMcpBrowser } = require('./modules/chromeMcpBrowser');
+
+// === Browser automation ===
+const browserManager = new BrowserManager();
+const chromeMcpBrowser = new ChromeMcpBrowser();
 
 // === Parallel Engine: глобальный пул конкурентности ===
 const globalPool = new ConcurrencyPool(4); // макс 4 параллельных AI-вызова
@@ -175,10 +181,11 @@ function isModelAvailableForUser(model, chatId = null) {
 const MODEL_FALLBACK_CHAIN = [
   'gemini-2.5-pro',
   'gemini-2.5-flash',
-  'llama3-70b',
+  'llama-3.3-70b-versatile',
   'deepseek-chat',
   'llama-4-maverick',
   'claude-haiku',
+  'gpt-4.1-mini',
 ];
 
 function getAvailableFallbackChain(chatId, excludeModel = null) {
@@ -295,34 +302,42 @@ function autoSelectModel(text, autoMap = {}, conversationHistory = []) {
   // Scoring system — каждая категория набирает очки, побеждает максимум
   const scores = { code: 0, math: 0, translate: 0, analysis: 0, creative: 0, quick: 0, general: 1 };
 
-  // Код
-  if (/\```|`[^`]+`|=>|console\.|print\(/.test(text)) scores.code += 5;
-  if (/function\s|class\s|const\s|let\s|var\s|import\s|def\s|return\s|\.(js|ts|py|jsx|tsx|html|css|sql|sh|json|yaml)\b|npm\s|git\s|docker|api\s|endpoint|база данн|database|сервер|бэкенд|фронтенд|backend|frontend/.test(t)) scores.code += 3;
-  if (/напиши код|напиши скрипт|напиши функ|write code|write a function|create a script|debug|отлад|исправь (баг|ошибк|код)|fix (bug|code)|реализуй|implement/.test(t)) scores.code += 4;
+  // Код — расширенные паттерны
+  if (/\```|`[^`]+`|=>|console\.|print\(|\.then\(|async\s|await\s/.test(text)) scores.code += 5;
+  if (/function\s|class\s|const\s|let\s|var\s|import\s|def\s|return\s|\.(js|ts|py|jsx|tsx|html|css|sql|sh|json|yaml|go|rs|cpp|java|rb|php|swift|kt)\b|npm\s|git\s|docker|api\s|endpoint|база данн|database|сервер|бэкенд|фронтенд|backend|frontend|webpack|vite|next\.?js|react|vue|angular|express|django|flask|fastapi/.test(t)) scores.code += 3;
+  if (/напиши код|напиши скрипт|напиши функ|write code|write a function|create a script|debug|отлад|исправь (баг|ошибк|код)|fix (bug|code)|реализуй|implement|refactor|рефактор|оптимизируй код|деплой|deploy|собери проект|build project/.test(t)) scores.code += 4;
+  // Код: паттерны файлов/путей
+  if (/[\/\\]\w+\.(js|ts|py|go|rs|json|yaml|md|html|css)/.test(text)) scores.code += 2;
 
-  // Математика
-  if (/посчитай|вычисли|калькул|формул|уравнен|интеграл|производн|матриц|математик|логическ|алгоритм/.test(t)) scores.math += 5;
+  // Математика — расширенные паттерны
+  if (/посчитай|вычисли|калькул|формул|уравнен|интеграл|производн|матриц|математик|логическ|алгоритм|статистик|вероятност|теорем|доказа|regression|корреляц|дисперси/.test(t)) scores.math += 5;
   if (/\d+[\s]*[+\-*/^]\s*\d+/.test(t)) scores.math += 3;
+  if (/процент|percentage|средн.*арифм|медиан|мода|sigma|дельта/.test(t)) scores.math += 2;
 
-  // Перевод
+  // Перевод — расширенные языки
   if (/^(переведи|translate|перевод|переведите|переведём)/i.test(t)) scores.translate += 6;
-  if (/на (английский|русский|немецкий|французский|испанский|китайский|японский|корейский|арабский)|to (english|russian|german|french|spanish)/i.test(t)) scores.translate += 3;
+  if (/на (английский|русский|немецкий|французский|испанский|китайский|японский|корейский|арабский|итальянский|португальский|турецкий|хинди|иврит)|to (english|russian|german|french|spanish|chinese|japanese|korean|arabic|italian|portuguese|turkish)/i.test(t)) scores.translate += 3;
+  if (/локализ|localize|i18n|l10n/.test(t)) scores.translate += 3;
 
-  // Анализ — градиентный бонус за длину вместо бинарного
-  if (/проанализируй|анализ|разбери|объясни подробно|детально|сравни|исследуй|рассмотри|оцени|review|analyze|explain in detail/.test(t)) scores.analysis += 5;
+  // Анализ — градиентный бонус за длину + расширенные триггеры
+  if (/проанализируй|анализ|разбери|объясни подробно|детально|сравни|исследуй|рассмотри|оцени|review|analyze|explain in detail|breakdown|декомпозиц|аудит|audit|отчёт|report|обзор|overview|дайджест|digest/.test(t)) scores.analysis += 5;
   if (len > 800) scores.analysis += 3;
   else if (len > 500) scores.analysis += 2;
   else if (len > 300) scores.analysis += 1;
+  // Анализ: вставленный текст/данные (цитаты, логи, таблицы)
+  if (/\n.*\n.*\n.*\n/.test(text) && len > 200) scores.analysis += 2;
 
-  // Креатив — disambiguate с кодом
-  if (/напиши|сочини|придумай|создай текст|статью|пост|рассказ|стих|сценарий|письмо|резюме|эссе|story|write|compose/.test(t)) scores.creative += 4;
+  // Креатив — disambiguate с кодом, расширенные триггеры
+  if (/напиши|сочини|придумай|создай текст|статью|пост|рассказ|стих|сценарий|письмо|резюме|эссе|story|write|compose|копирайт|copywriting|заголов|headline|слоган|контент.?план/.test(t)) scores.creative += 4;
   if (scores.code >= 3 && /напиши/.test(t)) scores.creative -= 2;
+  // Креатив: уточнение — если есть "код" рядом с "напиши", это код
+  if (/напиши.{0,20}(код|скрипт|функц|класс|компонент|api|бот|сервер|програм)/.test(t)) { scores.creative -= 3; scores.code += 2; }
 
   // Быстрый — обнуляется при наличии код/мат сигналов
-  if (/^(привет|здравствуй|хай|ку|хей|спасибо|ок|да|нет|понял|ладно|hi|hello|hey|thanks|ok|yes|no)$/i.test(t.trim())) scores.quick += 6;
+  if (/^(привет|здравствуй|хай|ку|хей|спасибо|ок|да|нет|понял|ладно|hi|hello|hey|thanks|ok|yes|no|good|хорошо|отлично|го|пок|бб|bye)$/i.test(t.trim())) scores.quick += 6;
   if (len < 30) scores.quick += 3;
   else if (len < 80) scores.quick += 1;
-  if (scores.code >= 3 || scores.math >= 3) scores.quick = 0;
+  if (scores.code >= 3 || scores.math >= 3 || scores.analysis >= 3) scores.quick = 0;
 
   // Усиленный контекст из истории диалога (до +3 за категорию)
   if (conversationHistory.length > 0) {
@@ -418,7 +433,7 @@ function analyzeRequest(chatId, text, complexity = 'medium') {
     analysis: ['claude-sonnet', 'gemini-2.5-pro', 'gpt-4.1'],
     creative: ['claude-sonnet', 'gpt-4.1', 'gemini-2.5-flash'],
     translate: ['gemini-2.5-flash', 'claude-haiku', 'gpt-4.1-mini'],
-    quick: ['claude-haiku', 'gemini-2.5-flash', 'llama3-70b'],
+    quick: ['claude-haiku', 'gemini-2.5-flash', 'llama-3.3-70b-versatile'],
     general: ['claude-sonnet', 'gemini-2.5-flash', 'gpt-4.1'],
   };
 
@@ -597,9 +612,16 @@ async function callOpenAI(modelId, messages, systemPrompt, chatId) {
   if (systemPrompt) msgs.push({ role: 'system', content: systemPrompt });
   msgs.push(...messages);
   const settings = uc.modelSettings?.[modelId] || {};
-  const maxTokens = settings.maxTokens !== undefined ? settings.maxTokens : 4096;
-  const body = { model: modelId, messages: msgs, max_tokens: maxTokens };
-  if (settings.temperature !== undefined) body.temperature = settings.temperature;
+  const isReasoningModel = /^(o[134]|o[134]-mini)/.test(modelId);
+  const defaultMaxTokens = isReasoningModel ? 16384 : 8192;
+  const maxTokens = settings.maxTokens !== undefined ? settings.maxTokens : defaultMaxTokens;
+  const body = { model: modelId, messages: msgs };
+  if (isReasoningModel) {
+    body.max_completion_tokens = maxTokens;
+  } else {
+    body.max_tokens = maxTokens;
+    if (settings.temperature !== undefined) body.temperature = settings.temperature;
+  }
 
   const res = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
@@ -698,7 +720,7 @@ async function callGroqChat(modelId, messages, systemPrompt, chatId) {
   if (systemPrompt) msgs.push({ role: 'system', content: systemPrompt });
   msgs.push(...messages);
   const settings = uc.modelSettings?.[modelId] || {};
-  const maxTokens = settings.maxTokens !== undefined ? settings.maxTokens : 4096;
+  const maxTokens = settings.maxTokens !== undefined ? settings.maxTokens : 8192;
   const body = { model: modelId, messages: msgs, max_tokens: maxTokens };
   if (settings.temperature !== undefined) body.temperature = settings.temperature;
 
@@ -724,7 +746,7 @@ async function callOpenRouter(modelId, messages, systemPrompt, chatId) {
   if (systemPrompt) msgs.push({ role: 'system', content: systemPrompt });
   msgs.push(...messages);
   const settings = uc.modelSettings?.[modelId] || {};
-  const maxTokens = settings.maxTokens !== undefined ? settings.maxTokens : 4096;
+  const maxTokens = settings.maxTokens !== undefined ? settings.maxTokens : 8192;
   const body = { model: modelId, messages: msgs, max_tokens: maxTokens };
   if (settings.temperature !== undefined) body.temperature = settings.temperature;
 
@@ -795,7 +817,7 @@ async function callOllama(modelId, messages, systemPrompt, chatId) {
   return { text, usage: { total_duration: data.total_duration, eval_count: data.eval_count } };
 }
 
-async function callOllamaStream(modelId, messages, systemPrompt, onChunk, chatId) {
+async function callOllamaStream(modelId, messages, systemPrompt, onChunk, chatId, signal = null) {
   const uc = chatId ? getUserConfig(chatId) : defaultUserConfig;
   const host = uc.ollamaHost || process.env.OLLAMA_HOST || 'http://localhost:11434';
   const timeout = Math.min((uc.timeout || 120) * 1000, 120000);
@@ -807,11 +829,12 @@ async function callOllamaStream(modelId, messages, systemPrompt, onChunk, chatId
   if (settings.temperature !== undefined) body.options = { ...body.options, temperature: settings.temperature };
   if (settings.maxTokens !== undefined) body.options = { ...body.options, num_predict: settings.maxTokens };
 
+  const fetchSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeout)]) : AbortSignal.timeout(timeout);
   const res = await fetch(`${host}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(timeout),
+    signal: fetchSignal,
   });
   if (!res.ok) {
     const err = await res.text().catch(() => '');
@@ -900,7 +923,7 @@ async function callGeminiCLI(modelId, messages, systemPrompt, allowMcp = true, c
   });
 }
 
-async function callGeminiCLIStream(modelId, messages, systemPrompt, onChunk, allowMcp = true, chatId = null, onEvent = null) {
+async function callGeminiCLIStream(modelId, messages, systemPrompt, onChunk, allowMcp = true, chatId = null, onEvent = null, signal = null) {
   const uc = chatId ? getUserConfig(chatId) : defaultUserConfig;
   const useStreamJson = !!onEvent;
   const extraArgs = useStreamJson ? ['-o', 'stream-json'] : [];
@@ -909,6 +932,8 @@ async function callGeminiCLIStream(modelId, messages, systemPrompt, onChunk, all
   return new Promise((resolve, reject) => {
     const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'CLAUDECODE'));
     const child = spawn(GEMINI_CLI_PATH, args, { cwd: process.env.WORKING_DIR || os.homedir(), env: cleanEnv, stdio: ['pipe', 'pipe', 'pipe'] });
+
+    if (signal) signal.addEventListener('abort', () => { try { child.kill(); } catch(e) {} }, { once: true });
 
     child.on('error', (err) => reject(new Error(`Gemini CLI: ${err.message}`)));
     child.stdin.end();
@@ -1112,7 +1137,7 @@ async function callCodexCLI(modelId, messages, systemPrompt, chatId = null) {
   });
 }
 
-async function callCodexCLIStream(modelId, messages, systemPrompt, onChunk, chatId = null, onEvent = null) {
+async function callCodexCLIStream(modelId, messages, systemPrompt, onChunk, chatId = null, onEvent = null, signal = null) {
   const uc = chatId ? getUserConfig(chatId) : defaultUserConfig;
   const useJson = !!onEvent;
   const extraArgs = useJson ? ['--json'] : [];
@@ -1121,6 +1146,8 @@ async function callCodexCLIStream(modelId, messages, systemPrompt, onChunk, chat
   return new Promise((resolve, reject) => {
     const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'CLAUDECODE'));
     const child = spawn(CODEX_CLI_PATH, args, { cwd: uc.workDir || os.homedir(), env: cleanEnv, stdio: ['pipe', 'pipe', 'pipe'] });
+
+    if (signal) signal.addEventListener('abort', () => { try { child.kill(); } catch(e) {} }, { once: true });
 
     child.on('error', (err) => reject(new Error(`Codex CLI: ${err.message}`)));
     child.stdin.end();
@@ -1264,7 +1291,7 @@ function formatToolDetail(toolName, input) {
   return JSON.stringify(input).slice(0, 120);
 }
 
-async function callAnthropicStream(modelId, messages, systemPrompt, onChunk, allowMcp = true, chatId = null, onEvent = null, cliOpts = {}) {
+async function callAnthropicStream(modelId, messages, systemPrompt, onChunk, allowMcp = true, chatId = null, onEvent = null, cliOpts = {}, signal = null) {
   const uc = chatId ? getUserConfig(chatId) : defaultUserConfig;
   const useStreamJson = !!onEvent;
   const extraArgs = useStreamJson ? ['--output-format', 'stream-json'] : [];
@@ -1274,6 +1301,8 @@ async function callAnthropicStream(modelId, messages, systemPrompt, onChunk, all
 
     const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'CLAUDECODE'));
     const child = spawn(CLAUDE_PATH, args, { cwd: process.env.WORKING_DIR || os.homedir(), env: cleanEnv, stdio: ['pipe', 'pipe', 'pipe'] });
+
+    if (signal) signal.addEventListener('abort', () => { try { child.kill(); } catch(e) {} }, { once: true });
 
     child.on('error', (err) => reject(new Error(`Claude CLI: ${err.message}`)));
     child.stdin.on('error', (err) => reject(new Error(`Claude CLI stdin: ${err.message}`)));
@@ -1335,7 +1364,7 @@ async function callAnthropicStream(modelId, messages, systemPrompt, onChunk, all
   });
 }
 
-async function callOpenAIStream(modelId, messages, systemPrompt, onChunk, chatId) {
+async function callOpenAIStream(modelId, messages, systemPrompt, onChunk, chatId, signal = null) {
   const uc = chatId ? getUserConfig(chatId) : defaultUserConfig;
   const key = uc.apiKeys?.openai || process.env.OPENAI_API_KEY;
   if (!key) throw new Error('OPENAI_API_KEY не задан');
@@ -1348,11 +1377,12 @@ async function callOpenAIStream(modelId, messages, systemPrompt, onChunk, chatId
   const body = { model: modelId, messages: msgs, max_tokens: maxTokens, stream: true };
   if (settings.temperature !== undefined) body.temperature = settings.temperature;
 
+  const fetchSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeout)]) : AbortSignal.timeout(timeout);
   const res = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(timeout),
+    signal: fetchSignal,
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -1362,7 +1392,7 @@ async function callOpenAIStream(modelId, messages, systemPrompt, onChunk, chatId
   return { text: text || 'Готово (без вывода)', usage: null };
 }
 
-async function callGeminiStream(modelId, messages, systemPrompt, onChunk, chatId) {
+async function callGeminiStream(modelId, messages, systemPrompt, onChunk, chatId, signal = null) {
   const uc = chatId ? getUserConfig(chatId) : defaultUserConfig;
   const key = uc.apiKeys?.google || process.env.GEMINI_API_KEY;
   if (!key) throw new Error('GEMINI_API_KEY не задан');
@@ -1388,7 +1418,7 @@ async function callGeminiStream(modelId, messages, systemPrompt, onChunk, chatId
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(timeout),
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeout)]) : AbortSignal.timeout(timeout),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -1423,7 +1453,7 @@ async function callGeminiStream(modelId, messages, systemPrompt, onChunk, chatId
   throw lastError;
 }
 
-async function callGroqStream(modelId, messages, systemPrompt, onChunk, chatId) {
+async function callGroqStream(modelId, messages, systemPrompt, onChunk, chatId, signal = null) {
   const uc = chatId ? getUserConfig(chatId) : defaultUserConfig;
   const key = uc.apiKeys?.groq || process.env.GROQ_API_KEY;
   if (!key) throw new Error('GROQ_API_KEY не задан');
@@ -1436,11 +1466,12 @@ async function callGroqStream(modelId, messages, systemPrompt, onChunk, chatId) 
   const body = { model: modelId, messages: msgs, max_tokens: maxTokens, stream: true };
   if (settings.temperature !== undefined) body.temperature = settings.temperature;
 
+  const fetchSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeout)]) : AbortSignal.timeout(timeout);
   const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(timeout),
+    signal: fetchSignal,
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -1450,7 +1481,7 @@ async function callGroqStream(modelId, messages, systemPrompt, onChunk, chatId) 
   return { text: text || 'Готово (без вывода)', usage: null };
 }
 
-async function callOpenRouterStream(modelId, messages, systemPrompt, onChunk, chatId) {
+async function callOpenRouterStream(modelId, messages, systemPrompt, onChunk, chatId, signal = null) {
   const uc = chatId ? getUserConfig(chatId) : defaultUserConfig;
   const key = uc.apiKeys?.openrouter || process.env.OPENROUTER_API_KEY;
   if (!key) throw new Error('OPENROUTER_API_KEY не задан');
@@ -1463,11 +1494,12 @@ async function callOpenRouterStream(modelId, messages, systemPrompt, onChunk, ch
   const body = { model: modelId, messages: msgs, max_tokens: maxTokens, stream: true };
   if (settings.temperature !== undefined) body.temperature = settings.temperature;
 
+  const fetchSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeout)]) : AbortSignal.timeout(timeout);
   const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(timeout),
+    signal: fetchSignal,
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -1477,7 +1509,7 @@ async function callOpenRouterStream(modelId, messages, systemPrompt, onChunk, ch
   return { text: text || 'Готово (без вывода)', usage: null };
 }
 
-async function callDeepSeekStream(modelId, messages, systemPrompt, onChunk, chatId) {
+async function callDeepSeekStream(modelId, messages, systemPrompt, onChunk, chatId, signal = null) {
   const uc = chatId ? getUserConfig(chatId) : defaultUserConfig;
   const key = uc.apiKeys?.deepseek || process.env.DEEPSEEK_API_KEY;
   if (!key) throw new Error('DEEPSEEK_API_KEY не задан');
@@ -1490,11 +1522,12 @@ async function callDeepSeekStream(modelId, messages, systemPrompt, onChunk, chat
   const body = { model: modelId, messages: msgs, max_tokens: maxTokens, stream: true };
   if (settings.temperature !== undefined) body.temperature = settings.temperature;
 
+  const fetchSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeout)]) : AbortSignal.timeout(timeout);
   const res = await fetch('https://api.deepseek.com/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(timeout),
+    signal: fetchSignal,
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -1504,7 +1537,7 @@ async function callDeepSeekStream(modelId, messages, systemPrompt, onChunk, chat
   return { text: text || 'Готово (без вывода)', usage: null };
 }
 
-async function callAIStream(model, messages, systemPrompt, onChunk, allowMcp = true, chatId = null, onEvent = null, cliOpts = {}) {
+async function callAIStream(model, messages, systemPrompt, onChunk, allowMcp = true, chatId = null, onEvent = null, cliOpts = {}, signal = null) {
   const start = Date.now();
   const routed = resolveCodexRoute(model, chatId);
   const effectiveModel = routed.model;
@@ -1512,15 +1545,15 @@ async function callAIStream(model, messages, systemPrompt, onChunk, allowMcp = t
   const modelId = MODEL_MAP[effectiveModel] || effectiveModel;
   let result;
   switch (provider) {
-    case 'anthropic': result = await callAnthropicStream(modelId, messages, systemPrompt, onChunk, allowMcp, chatId, onEvent, cliOpts); break;
-    case 'google': result = await callGeminiStream(modelId, messages, systemPrompt, onChunk, chatId); break;
-    case 'google-cli': result = await callGeminiCLIStream(modelId, messages, systemPrompt, onChunk, allowMcp, chatId, onEvent); break;
-    case 'codex-cli': result = await callCodexCLIStream(modelId, messages, systemPrompt, onChunk, chatId, onEvent); break;
-    case 'groq': result = await callGroqStream(modelId, messages, systemPrompt, onChunk, chatId); break;
-    case 'openrouter': result = await callOpenRouterStream(modelId, messages, systemPrompt, onChunk, chatId); break;
-    case 'deepseek': result = await callDeepSeekStream(modelId, messages, systemPrompt, onChunk, chatId); break;
-    case 'openai': result = await callOpenAIStream(modelId, messages, systemPrompt, onChunk, chatId); break;
-    case 'ollama': result = await callOllamaStream(modelId, messages, systemPrompt, onChunk, chatId); break;
+    case 'anthropic': result = await callAnthropicStream(modelId, messages, systemPrompt, onChunk, allowMcp, chatId, onEvent, cliOpts, signal); break;
+    case 'google': result = await callGeminiStream(modelId, messages, systemPrompt, onChunk, chatId, signal); break;
+    case 'google-cli': result = await callGeminiCLIStream(modelId, messages, systemPrompt, onChunk, allowMcp, chatId, onEvent, signal); break;
+    case 'codex-cli': result = await callCodexCLIStream(modelId, messages, systemPrompt, onChunk, chatId, onEvent, signal); break;
+    case 'groq': result = await callGroqStream(modelId, messages, systemPrompt, onChunk, chatId, signal); break;
+    case 'openrouter': result = await callOpenRouterStream(modelId, messages, systemPrompt, onChunk, chatId, signal); break;
+    case 'deepseek': result = await callDeepSeekStream(modelId, messages, systemPrompt, onChunk, chatId, signal); break;
+    case 'openai': result = await callOpenAIStream(modelId, messages, systemPrompt, onChunk, chatId, signal); break;
+    case 'ollama': result = await callOllamaStream(modelId, messages, systemPrompt, onChunk, chatId, signal); break;
     default:
       if (onEvent) onEvent({ type: 'error', message: `Unknown provider: ${provider}` });
       return { text: `[Fallback] Неизвестный провайдер: ${provider}` };
@@ -1555,14 +1588,15 @@ async function callAIWithFallback(primaryModel, messages, systemPrompt, chatId, 
 }
 
 async function callAIStreamWithFallback(primaryModel, messages, systemPrompt, onChunk, chatId, opts = {}) {
-  const { allowMcp = true, onFallback = null, onEvent = null, cliOpts = {} } = opts;
+  const { allowMcp = true, onFallback = null, onEvent = null, cliOpts = {}, signal = null } = opts;
   const chain = [primaryModel, ...getAvailableFallbackChain(chatId, primaryModel)];
   let lastError = null;
 
   for (let i = 0; i < chain.length; i++) {
+    if (signal?.aborted) throw new DOMException('Операция отменена', 'AbortError');
     const model = chain[i];
     try {
-      const result = await callAIStream(model, messages, systemPrompt, onChunk, allowMcp, chatId, onEvent, i === 0 ? cliOpts : {});
+      const result = await callAIStream(model, messages, systemPrompt, onChunk, allowMcp, chatId, onEvent, i === 0 ? cliOpts : {}, signal);
       return {
         ...result,
         fallbackUsed: model !== primaryModel,
@@ -1570,6 +1604,7 @@ async function callAIStreamWithFallback(primaryModel, messages, systemPrompt, on
         actualModel: result.model || model,
       };
     } catch (e) {
+      if (e.name === 'AbortError' || signal?.aborted) throw e;
       lastError = e;
       const nextModel = i + 1 < chain.length ? chain[i + 1] : null;
       console.log(`⚠️ Stream Fallback: ${model} → ${e.message.slice(0, 80)}${nextModel ? `, пробую ${nextModel}` : ', модели исчерпаны'}`);
@@ -1644,7 +1679,7 @@ const AUTO_MODEL_CATEGORIES = {
   quick: { label: '⚡ Быстрый', default: 'llama3-70b' },
   general: { label: '💬 Общий', default: 'gemini-2.5-flash' },
 };
-const defaultUserConfig = { model: 'claude-haiku', workDir: '/tmp', timeout: 300, historySize: 20, systemPrompt: '', language: '', skills: [], pins: [], autoModel: false, agentMode: true, agentMaxSteps: 10, thinking: false, role: 'user', banned: false, customAgents: [], apiKeys: {}, imageModel: 'nano-banana', imageAspect: '1:1', imageSize: '1K', videoModel: 'veo-3.1-fast', videoResolution: '720p', videoAspect: '16:9', videoDuration: '8', autoModelMap: {}, modelStats: {}, categoryPerf: {}, mcpServers: [], activeMode: null, modelSettings: {} };
+const defaultUserConfig = { model: 'claude-haiku', workDir: '/tmp', timeout: 300, historySize: 20, systemPrompt: '', language: '', skills: [], pins: [], autoModel: false, agentMode: true, agentMaxSteps: 20, thinking: false, role: 'user', banned: false, customAgents: [], apiKeys: {}, imageModel: 'nano-banana', imageAspect: '1:1', imageSize: '1K', videoModel: 'veo-3.1-fast', videoResolution: '720p', videoAspect: '16:9', videoDuration: '8', autoModelMap: {}, modelStats: {}, categoryPerf: {}, mcpServers: [], activeMode: null, modelSettings: {} };
 const userConfigs = new Map(); // chatId -> config
 const cancellableOperations = new Map(); // chatId -> { isCancelled: false }
 
@@ -1853,7 +1888,7 @@ for (const [id, cfg] of userConfigs) {
   // Миграция customAgents: добавляем поля если отсутствуют
   if (!cfg.customAgents) cfg.customAgents = [];
   for (const agent of cfg.customAgents) {
-    if (agent.maxSteps === undefined) agent.maxSteps = 3;
+    if (agent.maxSteps === undefined) agent.maxSteps = 6;
     if (agent.model === undefined) agent.model = '';
     if (agent.enabled === undefined) agent.enabled = true;
     if (agent.uses === undefined) agent.uses = 0;
@@ -2464,16 +2499,20 @@ function mainMenu(chatId) {
     { text: `🧠 ${modelShort} — ⟳`, callback_data: 'set_model' },
   ]);
 
-  // Медиа + Инструменты
+  // Quick Actions — самые частые операции без подменю
   rows.push([
-    { text: '🎨 Медиа', callback_data: 'media_menu' },
-    { text: '🛠 Инструменты', callback_data: 'tools_menu' },
+    { text: '🎨 Нарисовать', callback_data: 'quick_image' },
+    { text: '🎬 Видео', callback_data: 'quick_video' },
+    { text: '📝 Текст', callback_data: 'quick_text' },
   ]);
 
-  // Основные разделы (3 в ряд)
+  // Основные разделы
+  rows.push([
+    { text: '🎭 Режимы', callback_data: 'modes_menu' },
+    { text: '🛠 Инструменты', callback_data: 'tools_menu' },
+  ]);
   rows.push([
     { text: '🤖 Агенты', callback_data: 'agents_menu' },
-    { text: '🎭 Режимы', callback_data: 'modes_menu' },
     { text: '⚡ Навыки', callback_data: 'skills_menu' },
   ]);
 
@@ -2502,6 +2541,7 @@ function mediaMenu(chatId) {
     reply_markup: {
       inline_keyboard: [
         [{ text: '🎨 Создать изображение', callback_data: 'media_gen_image' }],
+        [{ text: '✏️ Редактировать фото', callback_data: 'media_edit_image' }],
         [{ text: '🎬 Создать видео', callback_data: 'media_gen_video' }],
         [{ text: '🎬 Продолжить видео', callback_data: 'media_extend_video' }],
         [{ text: '📐 Сценарий (раскадровка)', callback_data: 'media_scenario' }],
@@ -2516,26 +2556,32 @@ function mediaMenu(chatId) {
 }
 
 function toolsMenu(chatId) {
+  // Считаем активные напоминания
+  const reminders = [];
+  if (reminderTimers.has(chatId)) {
+    for (const [id, r] of reminderTimers.get(chatId)) reminders.push(r);
+  }
+  const remBadge = reminders.length > 0 ? ` (${reminders.length})` : '';
+
+  // Считаем задачи
+  const todos = (config.todos || []).filter(t => t.chatId === chatId);
+  const todoBadge = todos.length > 0 ? ` (${todos.length})` : '';
+
   return {
     reply_markup: {
       inline_keyboard: [
         [{ text: '📓 База знаний (NotebookLM)', callback_data: 'nb_menu' }],
         [{ text: '🔗 Интеграции (MCP)', callback_data: 'integrations' }],
         [
-          { text: '🌤 Погода', callback_data: 'plug_weather' },
-          { text: '💱 Курсы', callback_data: 'plug_exchange' },
+          { text: '📤 Экспорт чата', callback_data: 'export_chat' },
+          { text: '🔍 Веб-поиск', callback_data: 'quick_search' },
         ],
         [
-          { text: '₿ Крипто', callback_data: 'plug_crypto' },
-          { text: '🌍 Перевод', callback_data: 'plug_translate' },
+          { text: `✅ Задачи${todoBadge}`, callback_data: 'plug_todo' },
+          { text: `⏰ Напоминания${remBadge}`, callback_data: 'reminders_list' },
         ],
         [
-          { text: '🔗 QR-код', callback_data: 'plug_qr' },
-          { text: '⏲ Помодоро', callback_data: 'plug_pomodoro' },
-        ],
-        [
-          { text: '📝 Заметки', callback_data: 'plug_notes' },
-          { text: '✅ Задачи', callback_data: 'plug_todo' },
+          { text: '🎨 Медиа', callback_data: 'media_menu' },
         ],
         [{ text: '◀️ Назад', callback_data: 'back' }],
       ]
@@ -2762,6 +2808,8 @@ let waitingExchangeQuery = new Set(); // chatId -> ожидание запрос
 let waitingCryptoQuery = new Set(); // chatId -> ожидание запроса крипто
 let waitingTranslateQuery = new Set(); // chatId -> ожидание текста для перевода
 let waitingQRText = new Set(); // chatId -> ожидание текста для QR
+let waitingTextPrompt = new Set(); // chatId -> ожидание задания для текста
+let waitingSearchQuery = new Set(); // chatId -> ожидание поискового запроса
 const mediaGroupBuffer = new Map(); // groupId -> { chatId, photos: [], caption, timer }
 const sessionFrames = new Map(); // chatId -> { startFrame, endFrame, referenceImage, lastPhoto, lastPhotos: [], startPath, endPath, refPath, lastPhotoPath, lastPhotosPaths: [], savedAt }
 let offset = 0;
@@ -2774,7 +2822,8 @@ function clearAllWaiting(chatId) {
     waitingAuthPhone, waitingAuthCode, waitingAuthPassword, waitingNbCreate, waitingNbResearch,
     waitingSkillName, waitingAgentName, waitingMcpUrl,
     waitingImagePrompt, waitingVideoPrompt, waitingWeatherCity, waitingExchangeQuery,
-    waitingCryptoQuery, waitingTranslateQuery, waitingQRText];
+    waitingCryptoQuery, waitingTranslateQuery, waitingQRText,
+    waitingTextPrompt, waitingSearchQuery];
   const maps = [waitingChannelKeywords, waitingChannelPrompt, waitingNbQuery, waitingNbUrl,
     waitingNbText, waitingNbRename, waitingNbReportCustom,
     waitingSkillPrompt, waitingSkillEditName, waitingSkillEditPrompt, waitingSkillEditDesc,
@@ -2961,6 +3010,54 @@ function loadReminders() {
 
 loadReminders();
 
+// === Экспорт истории чата ===
+async function exportChatHistory(chatId) {
+  const history = chatHistory.get(chatId);
+  if (!history || history.length === 0) {
+    send(chatId, '📭 История чата пуста. Напишите что-нибудь, чтобы она появилась.');
+    return;
+  }
+  const lines = [];
+  lines.push(`=== Экспорт чата ===`);
+  lines.push(`Дата: ${new Date().toLocaleString('ru-RU')}`);
+  lines.push(`Сообщений: ${history.length}`);
+  lines.push('');
+  for (const msg of history) {
+    const role = msg.role === 'user' ? '👤 Вы' : '🤖 AI';
+    lines.push(`${role}:`);
+    lines.push(msg.text || msg.content || '');
+    lines.push('');
+  }
+  const tmpFile = `/tmp/chat_export_${chatId}_${Date.now()}.txt`;
+  fs.writeFileSync(tmpFile, lines.join('\n'), 'utf8');
+  try {
+    await sendDocument(chatId, tmpFile, `📤 Экспорт чата (${history.length} сообщений)`);
+  } catch (e) {
+    send(chatId, `❌ Ошибка экспорта: ${e.message}`);
+  }
+  try { fs.unlinkSync(tmpFile); } catch {}
+}
+
+// === Меню напоминаний ===
+function remindersMenu(chatId) {
+  const userReminders = (config.reminders || []).filter(r => r.chatId === chatId);
+  if (userReminders.length === 0) {
+    send(chatId, '⏰ У вас нет активных напоминаний.\n\nНапишите: «напомни через 2 часа позвонить»');
+    return;
+  }
+  const rows = [];
+  for (const r of userReminders) {
+    const timeLeft = r.fireAt - Date.now();
+    const mins = Math.max(0, Math.round(timeLeft / 60000));
+    const timeStr = mins >= 60 ? `${Math.floor(mins / 60)}ч ${mins % 60}м` : `${mins}м`;
+    const repeat = r.repeat ? ' 🔄' : '';
+    rows.push([{ text: `⏰ ${r.text.slice(0, 30)}${r.text.length > 30 ? '…' : ''} — ${timeStr}${repeat}`, callback_data: `noop_${r.id}` }]);
+    rows.push([{ text: '❌ Отменить', callback_data: `cancel_reminder_${r.id}` }]);
+  }
+  rows.push([{ text: '◀️ Назад', callback_data: 'tools_menu' }]);
+  send(chatId, `⏰ Активные напоминания (${userReminders.length}):`, { reply_markup: { inline_keyboard: rows } });
+}
+
 // === Задачи (todo, персистентные) ===
 // config.todos = [{ id, chatId, text, status:'pending'|'in_progress'|'done', createdAt, dueAt?, priority?, category? }]
 let nextTodoId = 1;
@@ -2982,10 +3079,17 @@ async function fireScheduledAction(id) {
   scheduledTimers.delete(id);
   send(action.chatId, `⏰ Выполняю запланированное действие: ${action.description || action.actionName}`);
   try {
-    const result = await executeAction(action.chatId, { name: action.actionName, body: action.actionBody });
-    if (result && !result.silent) {
-      const icon = result.success ? '✅' : '❌';
-      send(action.chatId, `${icon} Результат: ${(result.output || '').slice(0, 2000)}`);
+    if (action.actionName === 'agent') {
+      // Полный агентный цикл через runClaude — доступ ко всем 39+ экшенам
+      const taskPrompt = action.actionBody || action.description;
+      const contextNote = action.context ? `\n\nКонтекст: ${action.context}` : '';
+      await runClaude(action.chatId, `[SCHEDULED TASK] ${taskPrompt}${contextNote}`, { scheduled: true });
+    } else {
+      const result = await executeAction(action.chatId, { name: action.actionName, body: action.actionBody });
+      if (result && !result.silent) {
+        const icon = result.success ? '✅' : '❌';
+        send(action.chatId, `${icon} Результат: ${(result.output || '').slice(0, 2000)}`);
+      }
     }
   } catch (e) {
     send(action.chatId, `❌ Ошибка запланированного действия: ${e.message}`);
@@ -3263,7 +3367,8 @@ async function processSmartSetup(chatId, description) {
     // Извлекаем JSON из ответа
     const jsonMatch = stdout.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error('No JSON');
-    const parsed = JSON.parse(jsonMatch[0]);
+    let parsed;
+    try { parsed = JSON.parse(jsonMatch[0]); } catch (e) { throw new Error('Invalid JSON from AI: ' + e.message); }
 
     if (!parsed.channels || !Array.isArray(parsed.channels) || parsed.channels.length === 0) {
       send(chatId, '❌ Не удалось определить каналы. Укажите @username канала в описании.');
@@ -3769,6 +3874,56 @@ async function handleCallback(cb) {
     if (msgId) tgApi('deleteMessage', { chat_id: chatId, message_id: msgId }).catch(() => {});
     runClaude(chatId, 'Покажи мой список задач');
   }
+  // === Quick Actions из главного меню ===
+  else if (data === 'quick_image') {
+    clearAllWaiting(chatId);
+    waitingImagePrompt.add(chatId);
+    setWaitingTimeout(chatId, waitingImagePrompt, 'waitingImagePrompt');
+    if (msgId) tgApi('deleteMessage', { chat_id: chatId, message_id: msgId }).catch(() => {});
+    send(chatId, '🎨 Опишите что нарисовать:', { reply_markup: { inline_keyboard: [[{ text: '◀️ Отмена', callback_data: 'back' }]] } });
+  }
+  else if (data === 'quick_video') {
+    clearAllWaiting(chatId);
+    waitingVideoPrompt.add(chatId);
+    setWaitingTimeout(chatId, waitingVideoPrompt, 'waitingVideoPrompt');
+    if (msgId) tgApi('deleteMessage', { chat_id: chatId, message_id: msgId }).catch(() => {});
+    send(chatId, '🎬 Опишите видео:', { reply_markup: { inline_keyboard: [[{ text: '◀️ Отмена', callback_data: 'back' }]] } });
+  }
+  else if (data === 'quick_text') {
+    clearAllWaiting(chatId);
+    waitingTextPrompt.add(chatId);
+    if (msgId) tgApi('deleteMessage', { chat_id: chatId, message_id: msgId }).catch(() => {});
+    send(chatId, '📝 Опишите что написать:\n\nНапример: «пост про AI для Instagram» или «письмо клиенту»', { reply_markup: { inline_keyboard: [[{ text: '◀️ Отмена', callback_data: 'back' }]] } });
+  }
+  else if (data === 'quick_search') {
+    clearAllWaiting(chatId);
+    waitingSearchQuery.add(chatId);
+    if (msgId) tgApi('deleteMessage', { chat_id: chatId, message_id: msgId }).catch(() => {});
+    send(chatId, '🔍 Что найти в интернете?', { reply_markup: { inline_keyboard: [[{ text: '◀️ Отмена', callback_data: 'back' }]] } });
+  }
+  else if (data === 'export_chat') {
+    if (msgId) tgApi('deleteMessage', { chat_id: chatId, message_id: msgId }).catch(() => {});
+    exportChatHistory(chatId);
+  }
+  else if (data === 'reminders_list') {
+    if (msgId) tgApi('deleteMessage', { chat_id: chatId, message_id: msgId }).catch(() => {});
+    remindersMenu(chatId);
+  }
+  else if (data.startsWith('cancel_reminder_')) {
+    const remId = parseInt(data.replace('cancel_reminder_', ''));
+    const timer = reminderTimers.get(remId);
+    if (timer) { clearTimeout(timer); reminderTimers.delete(remId); }
+    config.reminders = (config.reminders || []).filter(r => r.id !== remId);
+    saveConfig();
+    if (msgId) tgApi('deleteMessage', { chat_id: chatId, message_id: msgId }).catch(() => {});
+    send(chatId, '✅ Напоминание отменено');
+    remindersMenu(chatId);
+  }
+  else if (data === 'media_edit_image') {
+    clearAllWaiting(chatId);
+    if (msgId) tgApi('deleteMessage', { chat_id: chatId, message_id: msgId }).catch(() => {});
+    send(chatId, '✏️ Отправьте фото и опишите что изменить.\n\nНапример: отправьте фото + «убери фон» или «сделай ярче»');
+  }
   else if (data === 'help') await editText(chatId, msgId, helpText(), mainMenu(chatId));
   else if (data === 'stats') {
     const uc = getUserConfig(chatId);
@@ -3863,12 +4018,14 @@ MODEL: ${uc.model}`;
   }  // === Быстрые переключатели главного меню (mt_) ===
   else if (data === 'mt_agent') { uc.agentMode = uc.agentMode === false ? true : false; saveUserConfig(chatId); await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: `🤖 Режим агента: ${uc.agentMode ? 'включён' : 'выключен'}` }); await editText(chatId, msgId, '🤖 Главное меню', mainMenu(chatId)); }
   else if (data === 'mem_menu') {
-    const s = zepMemory.stats();
-    const zepLine = s.enabled ? (s.zepQuotaExhausted ? '⚠️ Zep Cloud: лимит исчерпан' : '✅ Zep Cloud активна') : '❌ Zep Cloud не настроена';
-    const localLine = `📋 Локальная: ${s.localFacts} фактов, ${s.localUsers} пользователей`;
+    const s = await zepMemory.stats();
+    const backendLine = s.pgConnected
+      ? `✅ PostgreSQL: ${s.pgFacts || 0} фактов, ${s.pgMessages || 0} сообщений, ${s.pgUsers || 0} юзеров`
+      : '📋 Локальный режим (DATABASE_URL не задан)';
+    const localLine = `📂 Локальный кеш: ${s.localFacts} фактов, ${s.localUsers} юзеров`;
     const ctx = zepMemory.getContext(chatId);
     const ctxPreview = ctx ? `\n\nТекущий контекст:\n${ctx.slice(0, 300)}${ctx.length > 300 ? '…' : ''}` : '\n\nКонтекст пока пуст — расскажи о себе.';
-    await editText(chatId, msgId, `🧠 Память\n\n${zepLine}\n${localLine}${ctxPreview}`, {
+    await editText(chatId, msgId, `🧠 Память (${s.backend})\n\n${backendLine}\n${localLine}${ctxPreview}`, {
       reply_markup: { inline_keyboard: [[{ text: '◀️ Назад', callback_data: 'back' }]] }
     });
   }
@@ -3882,16 +4039,25 @@ MODEL: ${uc.model}`;
       task.status = 'cancelled';
       userBg.delete(taskId);
       await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: '✅ Задача отменена' });
-      await editText(chatId, msgId, `✅ Фоновая задача отменена: ${task.desc}`, mainMenu(chatId));
+      await showTasksMenu(chatId, msgId);
     } else {
       await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: '❌ Задача не найдена' });
     }
+  }
+  // === Foreground задачи ===
+  else if (data.startsWith('fg_cancel_')) {
+    const taskId = data.slice(10);
+    const token = cancellableOperations.get(chatId);
+    if (token) token.isCancelled = true;
+    stopTask(chatId, taskId);
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: '⛔ Задача остановлена' });
+    await showTasksMenu(chatId, msgId);
   }
   else if (data === 'set_max_steps') {
     await editText(chatId, msgId, `🔢 Максимум шагов агента (сейчас: ${uc.agentMaxSteps || 10}):`, {
       reply_markup: {
         inline_keyboard: [
-          ...[5, 10, 15, 20].map(n => [{ text: (n === (uc.agentMaxSteps || 10) ? '✅ ' : '') + n, callback_data: `maxsteps_${n}` }]),
+          ...[10, 20, 30, 50].map(n => [{ text: (n === (uc.agentMaxSteps || 20) ? '✅ ' : '') + n, callback_data: `maxsteps_${n}` }]),
           [{ text: '◀️ Назад', callback_data: 'settings' }]
         ]
       }
@@ -4185,61 +4351,7 @@ MODEL: ${uc.model}`;
   }
   // === Задачи из меню ===
   else if (data === 'tasks_menu') {
-    const userBg = getUserBgTasks(chatId);
-    const fgTask = activeTasks.has(chatId);
-    const todos = (config.todos || []).filter(t => t.chatId === chatId);
-    const provLabel = PROVIDER_LABELS[getProvider(uc.model)] || '';
-    const uptime = Math.round((Date.now() - stats.startTime) / 60000);
-    const histLen = (chatHistory.get(chatId) || []).length;
-    const uptimeH = uptime >= 60 ? `${Math.floor(uptime / 60)}ч${uptime % 60}м` : `${uptime}м`;
-
-    let msg = '📊 Статус | 📋 Задачи\n\n';
-    msg += `🤖 Модель: ${uc.model} ${provLabel}\n`;
-    msg += `⏱ Аптайм: ${uptimeH} | 💬 История: ${histLen}\n\n`;
-
-    if (fgTask) {
-      const activeTask = activeTasks.get(chatId);
-      const state = activeTask?.statusState;
-      if (state) {
-        const fmtSec = (s) => s >= 3600 ? `${Math.floor(s / 3600)}ч${Math.floor((s % 3600) / 60)}м` : s >= 60 ? `${Math.floor(s / 60)}м${s % 60}с` : `${s}с`;
-        const elapsed = Math.round((Date.now() - state.startTime) / 1000);
-        const progress = state.maxSteps > 0 ? Math.round((state.step / state.maxSteps) * 100) : 0;
-        msg += `🔵 Основная: ${(state.actionName || 'выполняется').slice(0, 30)}\n`;
-        msg += `   ${state.step}/${state.maxSteps} шагов • ${progress}% • ⏱${fmtSec(elapsed)}\n\n`;
-      } else {
-        msg += '🔵 Основная: выполняется\n\n';
-      }
-    }
-
-    if (userBg.size > 0) {
-      const fmtSec = (s) => s >= 60 ? `${Math.floor(s / 60)}м${s % 60}с` : `${s}с`;
-      msg += `🔄 Фоновые (${userBg.size}/${MAX_BG_TASKS_PER_USER}):\n`;
-      for (const [tid, t] of userBg) {
-        const elapsed = Math.round((Date.now() - t.startTime) / 1000);
-        const statusIcon = t.status === 'running' ? '⏳' : t.status === 'done' ? '✅' : '❌';
-        msg += `  ${statusIcon} ${t.desc} (${fmtSec(elapsed)})\n`;
-      }
-      msg += '\n';
-    }
-
-    if (todos.length > 0) {
-      msg += `✅ Задачи (${todos.length}):\n`;
-      const statusIcons = { pending: '□', in_progress: '🔄', done: '✅' };
-      todos.slice(0, 10).forEach(t => {
-        msg += `  ${statusIcons[t.status] || '□'} ${t.text}\n`;
-      });
-    }
-
-    if (!fgTask && userBg.size === 0 && todos.length === 0) {
-      msg += '🟢 Нет активных задач';
-    }
-
-    const rows = [];
-    for (const [tid, t] of userBg) {
-      if (t.status === 'running') rows.push([{ text: `❌ Отменить: ${t.desc.slice(0, 20)}`, callback_data: `bg_cancel_${tid}` }]);
-    }
-    rows.push([{ text: '🔄 Обновить', callback_data: 'tasks_menu' }, { text: '◀️ Назад', callback_data: 'back' }]);
-    await editText(chatId, msgId, msg, { reply_markup: { inline_keyboard: rows } });
+    await showTasksMenu(chatId, msgId);
   }
   else if (data === 'back' || data === 'main') await editText(chatId, msgId, '🤖 Главное меню', mainMenu(chatId));
 
@@ -4305,7 +4417,8 @@ MODEL: ${uc.model}`;
       }
       rows.push([{ text: '➕ Создать', callback_data: 'skill_create' }]);
       rows.push([{ text: '◀️ Назад', callback_data: 'back' }]);
-      await editText(chatId, msgId, `⚡ Навыки (${skills.length}):`, { reply_markup: { inline_keyboard: rows } });
+      const pageLabel = totalPages > 1 ? ` — стр. ${page + 1}/${totalPages}` : '';
+      await editText(chatId, msgId, `⚡ Навыки (${skills.length})${pageLabel}:`, { reply_markup: { inline_keyboard: rows } });
     }
   }
   else if (data === 'skill_create') {
@@ -4485,7 +4598,8 @@ MODEL: ${uc.model}`;
     }
     rows.push([{ text: '➕ Создать', callback_data: 'agent_create' }]);
     rows.push([{ text: '◀️ Назад', callback_data: 'back' }]);
-    await editText(chatId, msgId, `👥 Агенты (встроенных: ${builtinEntries.length - 1}, своих: ${custom.length})\n\nСтатус: ${agentOn ? '✅ Активна' : '❌ Выключена'}`, { reply_markup: { inline_keyboard: rows } });
+    const pageLabel = totalPages > 1 ? ` — стр. ${page + 1}/${totalPages}` : '';
+    await editText(chatId, msgId, `👥 Агенты (встроенных: ${builtinEntries.length - 1}, своих: ${custom.length})${pageLabel}\n\nСтатус: ${agentOn ? '✅ Активна' : '❌ Выключена'}`, { reply_markup: { inline_keyboard: rows } });
   }
   else if (data === 'prison_blocks') {
     // ═══ PRISON CELL BLOCKS DASHBOARD ═══
@@ -5318,6 +5432,74 @@ function stopTask(chatId, taskId = null) {
   messageQueue.delete(chatId);
 }
 
+async function showTasksMenu(chatId, msgId) {
+  const uc = getUserConfig(chatId);
+  const fgTasks = getActiveFgTasks(chatId);
+  const userBg = getUserBgTasks(chatId);
+  const todos = (config.todos || []).filter(t => t.chatId === chatId);
+  const provLabel = PROVIDER_LABELS[getProvider(uc.model)] || '';
+  const uptime = Math.round((Date.now() - stats.startTime) / 60000);
+  const histLen = (chatHistory.get(chatId) || []).length;
+  const uptimeH = uptime >= 60 ? `${Math.floor(uptime / 60)}ч${uptime % 60}м` : `${uptime}м`;
+  const fmtSec = (s) => s >= 3600 ? `${Math.floor(s / 3600)}ч${Math.floor((s % 3600) / 60)}м` : s >= 60 ? `${Math.floor(s / 60)}м${s % 60}с` : `${s}с`;
+
+  let msg = '📋 Менеджер задач\n\n';
+  msg += `🤖 ${uc.model} ${provLabel} | ⏱ ${uptimeH} | 💬 ${histLen}\n\n`;
+
+  const rows = [];
+
+  // Foreground задачи
+  if (fgTasks.size > 0) {
+    msg += `🔵 Foreground (${fgTasks.size}):\n`;
+    for (const [tid, task] of fgTasks) {
+      const elapsed = Math.round((Date.now() - (task._startTime || task.startTime || Date.now())) / 1000);
+      const st = task.statusState;
+      if (st) {
+        const progress = st.maxSteps > 0 ? Math.round((st.step / st.maxSteps) * 100) : 0;
+        msg += `  ⏳ ${(task.description || st.actionName || 'задача').slice(0, 35)}\n`;
+        msg += `     ${st.step}/${st.maxSteps} шагов • ${progress}% • ⏱${fmtSec(elapsed)}\n`;
+      } else {
+        msg += `  ⏳ ${(task.description || 'задача').slice(0, 35)} • ⏱${fmtSec(elapsed)}\n`;
+      }
+      rows.push([{ text: `⛔ Стоп: ${(task.description || 'задача').slice(0, 20)}`, callback_data: `fg_cancel_${tid}` }]);
+    }
+    msg += '\n';
+  }
+
+  // Background задачи
+  if (userBg.size > 0) {
+    msg += `🟡 Background (${userBg.size}/${MAX_BG_TASKS_PER_USER}):\n`;
+    for (const [tid, t] of userBg) {
+      const elapsed = Math.round((Date.now() - t.startTime) / 1000);
+      const statusIcon = t.status === 'running' ? '⏳' : t.status === 'done' ? '✅' : '❌';
+      msg += `  ${statusIcon} ${t.desc} (${fmtSec(elapsed)})\n`;
+      if (t.status === 'running') rows.push([{ text: `❌ Отменить: ${t.desc.slice(0, 20)}`, callback_data: `bg_cancel_${tid}` }]);
+    }
+    msg += '\n';
+  }
+
+  // Todos
+  if (todos.length > 0) {
+    msg += `✅ Задачи (${todos.length}):\n`;
+    const statusIcons = { pending: '□', in_progress: '🔄', done: '✅' };
+    todos.slice(0, 10).forEach(t => { msg += `  ${statusIcons[t.status] || '□'} ${t.text}\n`; });
+    msg += '\n';
+  }
+
+  const totalActive = fgTasks.size + [...userBg.values()].filter(t => t.status === 'running').length;
+  if (totalActive === 0 && todos.length === 0) {
+    msg += '🟢 Нет активных задач';
+  } else {
+    msg += `⚙️ Всего активных: ${totalActive}`;
+  }
+
+  if (totalActive > 1) {
+    rows.push([{ text: '⛔ Остановить всё', callback_data: 'stop_agents' }]);
+  }
+  rows.push([{ text: '🔄 Обновить', callback_data: 'tasks_menu' }, { text: '◀️ Назад', callback_data: 'back' }]);
+  await editText(chatId, msgId, msg, { reply_markup: { inline_keyboard: rows } });
+}
+
 // === MCP HTTP/SSE Client — универсальный клиент для пользовательских MCP-серверов ===
 class MCPHttpClient {
   constructor(config) {
@@ -5722,12 +5904,12 @@ async function nbDirectGenerate(chatId, msgId, nbId, toolName, extraArgs, emoji,
                 const filePath = `/tmp/nb_${Date.now()}.${ext}`;
                 const fileRes = await fetch(url, { signal: AbortSignal.timeout(60000) });
                 const buf = Buffer.from(await fileRes.arrayBuffer());
-                fs.writeFileSync(filePath, buf);
+                await fs.promises.writeFile(filePath, buf);
                 if (['mp3', 'wav', 'ogg', 'm4a'].includes(ext)) await sendAudio(chatId, filePath, label);
                 else if (['mp4', 'webm', 'mov'].includes(ext)) await sendVideo(chatId, filePath, label);
                 else if (['png', 'jpg', 'jpeg'].includes(ext)) await sendPhoto(chatId, filePath, label);
                 else await sendDocument(chatId, filePath);
-                try { fs.unlinkSync(filePath); } catch (e) { }
+                try { await fs.promises.unlink(filePath); } catch (e) { }
               } catch (dlErr) {
                 resultText += `\n⚠️ Не удалось скачать: ${dlErr.message}`;
               }
@@ -5754,37 +5936,27 @@ async function nbDirectGenerate(chatId, msgId, nbId, toolName, extraArgs, emoji,
 
 // === Помощь ===
 function helpText() {
-  return `🤖 *AI-ассистент* — просто напишите что нужно
+  return `🤖 *S.C.O.R.P.* — просто напишите что нужно
 
-💬 *Примеры запросов:*
-• "нарисуй кота в космосе" — создаст изображение
-• "сделай видео заката" — создаст видео
-• "напомни через 2 часа позвонить" — поставит напоминание
-• "добавь задачу: купить молоко" — добавит в список
-• "найди в интернете последние новости" — поищет в сети
-• "выполни: ls -la" — выполнит команду
-• "запомни: я люблю краткие ответы" — сохранит в памяти
+💬 *Примеры:*
+• «нарисуй кота в космосе» — изображение
+• «сделай видео заката» — видео
+• «напомни через 2ч позвонить» — напоминание
+• «найди в интернете новости AI» — веб-поиск
+• «напиши пост для Instagram» — генерация текста
+• «переведи на английский» — перевод
+• «выполни: npm init» — команды
 
-📋 *Меню:*
-🎨 Медиа — генерация изображений, видео, сценариев
-🛠 Инструменты — плагины (погода, курсы, крипто, перевод, QR)
-🤖 Агенты — специализированные AI-агенты
-🎭 Режимы — роли: разработчик, аналитик и 50+ других
-⚡ Навыки — сохранённые промпты
-📋 Задачи — статус + задачи + фоновые процессы
-⚙️ Настройки — модель, память, API ключи, помощь
+🚀 *Quick Actions в меню:*
+🎨 Нарисовать • 🎬 Видео • 📝 Текст
 
-📋 *Команды:*
-/menu — главное меню
-/settings — настройки
-/mode — режимы AI
-/stop — остановить задачу
-/clear — очистить историю
-/frames — кадры для видео
-/help — эта справка
+🛠 *Инструменты:*
+📓 База знаний • 📤 Экспорт • 🔍 Поиск • ⏰ Напоминания
 
-🎤 Голосовые распознаются автоматически
-📎 Принимает файлы, фото, документы`;
+📋 /menu • ⚙️ /settings • 🎭 /mode • 👤 /profile
+🔄 /clear • ⛔ /stop • ❓ /help
+
+🎤 Голос · 📎 Файлы · 📷 Фото — всё распознаётся`;
 }
 
 // === Bash команда ===
@@ -5908,7 +6080,7 @@ async function handleFile(chatId, msg) {
 
     // Всегда читаем imgData для фото — нужно для хранения и прямой анимации
     let imgData = null;
-    try { imgData = fs.readFileSync(destPath).toString('base64'); } catch (e) { console.warn('Photo read failed:', e.message); }
+    try { imgData = (await fs.promises.readFile(destPath)).toString('base64'); } catch (e) { console.warn('Photo read failed:', e.message); }
 
     if (imgData) {
       // Всегда сохраняем последнее загруженное фото — агент сможет использовать его
@@ -6008,7 +6180,7 @@ async function handleFile(chatId, msg) {
     }
     const group = mediaGroupBuffer.get(groupId);
     try {
-      const imgData = fs.readFileSync(destPath).toString('base64');
+      const imgData = (await fs.promises.readFile(destPath)).toString('base64');
       group.photos.push(imgData);
       group.paths.push(destPath);
     } catch (e) { console.warn('Media group photo read failed:', e.message); }
@@ -6081,7 +6253,7 @@ async function handleFile(chatId, msg) {
     const idx = waitingSkillEditPrompt.get(chatId);
     waitingSkillEditPrompt.delete(chatId);
     try {
-      const fileContent = fs.readFileSync(destPath, 'utf8').trim();
+      const fileContent = (await fs.promises.readFile(destPath, 'utf8')).trim();
       if (!fileContent) { send(chatId, '❌ Файл пустой'); return true; }
       if (uc.skills && uc.skills[idx]) {
         uc.skills[idx].prompt = fileContent;
@@ -6101,7 +6273,7 @@ async function handleFile(chatId, msg) {
     const name = typeof pending === 'object' ? pending.name : pending;
     const category = typeof pending === 'object' ? pending.category : 'other';
     try {
-      const fileContent = fs.readFileSync(destPath, 'utf8').trim();
+      const fileContent = (await fs.promises.readFile(destPath, 'utf8')).trim();
       if (!fileContent) { send(chatId, '❌ Файл пустой'); return true; }
       if (!uc.skills) uc.skills = [];
       uc.skills.push({ name, prompt: fileContent, description: '', category, uses: 0, lastUsed: null });
@@ -6118,7 +6290,7 @@ async function handleFile(chatId, msg) {
     const agentData = waitingAgentPrompt.get(chatId);
     waitingAgentPrompt.delete(chatId);
     try {
-      const fileContent = fs.readFileSync(destPath, 'utf8').trim();
+      const fileContent = (await fs.promises.readFile(destPath, 'utf8')).trim();
       if (!fileContent) { send(chatId, '❌ Файл пустой'); return true; }
       if (!uc.customAgents) uc.customAgents = [];
       uc.customAgents.push({ id: agentData.id, icon: agentData.icon || '🤖', label: agentData.label, desc: agentData.desc || '', prompt: fileContent, maxSteps: 3, model: '', enabled: true, uses: 0, lastUsed: null });
@@ -6135,7 +6307,7 @@ async function handleFile(chatId, msg) {
     const idx = waitingAgentEditPrompt.get(chatId);
     waitingAgentEditPrompt.delete(chatId);
     try {
-      const fileContent = fs.readFileSync(destPath, 'utf8').trim();
+      const fileContent = (await fs.promises.readFile(destPath, 'utf8')).trim();
       if (!fileContent) { send(chatId, '❌ Файл пустой'); return true; }
       if (uc.customAgents && uc.customAgents[idx]) {
         uc.customAgents[idx].prompt = fileContent;
@@ -6175,7 +6347,7 @@ async function transcribeVoice(filePath, chatId = null) {
   if (!key) return { text: null, error: 'Нет Gemini API ключа для транскрипции' };
 
   try {
-    const audioData = fs.readFileSync(filePath).toString('base64');
+    const audioData = (await fs.promises.readFile(filePath)).toString('base64');
     const ext = path.extname(filePath).slice(1).toLowerCase();
     const mimeMap = { ogg: 'audio/ogg', oga: 'audio/ogg', mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav', aac: 'audio/aac', opus: 'audio/opus' };
     const mimeType = mimeMap[ext] || 'audio/ogg';
@@ -6336,44 +6508,102 @@ function buildFramesContextPrompt(chatId) {
 
 const AGENT_SYSTEM_PROMPT = `You are an AI assistant capable of EXECUTING actions on the user's server. You don't just advise — you act.
 
-## 🧠 Deductive Reasoning — ALWAYS analyze before acting
+## 🧠 Chain-of-Thought Reasoning — THINK FAST, ACT SMART
 
-BEFORE ACTING, determine:
-1. **Intent**: what does the user want? (create / fix / explain / research / verify)
-2. **Tools**: what actions are needed? → choose from the list below
-3. **Roles**: who to delegate to? → coder / researcher / reviewer / writer / devops, etc.
-4. **Complexity**: simple question → answer immediately; complex task → plan
+For EVERY request, run this mental pipeline (do NOT write it out — just apply internally):
 
-### Planning Rule (for medium/complex/very_complex tasks):
-- Step 1 → [ACTION: think] — analysis: what is needed, how to do it, what subtasks
-- Step 2 → [ACTION: plan] — decompose into subtasks with roles and dependencies
-- Step 3 → [ACTION: execute_plan] or [ACTION: parallel] — parallel execution
+**Step 1 — CLASSIFY** (instant):
+- Greeting/simple question → answer directly, no actions
+- Single action (draw/run/remind) → execute immediately
+- Multi-step task → plan first
+- Ambiguous request → clarify with ONE question
 
-### Auto-selection of tools:
-- System task (install/run/check/files) → [ACTION: bash]
-- Write/fix code → [ACTION: delegate] role=coder
-- Code + quality check → delegate coder, then delegate reviewer
-- Research/analyze → [ACTION: delegate] researcher or [ACTION: parallel]
-- Multiple independent tasks → [ACTION: parallel]
-- Complex task with dependencies → [ACTION: plan] + [ACTION: execute_plan]
-- Need to compare options / get the best answer → [ACTION: council]
+**Step 2 — INTENT** (what does the user REALLY want?):
+- CREATE: build something new (code, image, video, project, text)
+- FIX: repair/debug/correct something existing
+- EXPLAIN: understand/learn/analyze
+- RESEARCH: find information, compare options, investigate
+- TRANSFORM: convert/translate/edit/modify existing content
+- AUTOMATE: schedule, remind, background tasks
 
-IMPORTANT: The user communicates in NATURAL LANGUAGE. There are no commands. Determine the intent and execute the action:
+**Step 3 — OPTIMAL TOOL** (choose the FASTEST path):
+- Direct answer possible? → Answer without actions (fastest)
+- System command needed? → [ACTION: bash] (2-30s)
+- Code task? → [ACTION: delegate] role=coder (30-90s)
+- Media generation? → [ACTION: image] or [ACTION: video] (2-120s)
+- Research needed? → [ACTION: delegate] researcher (30-60s)
+- Multiple independent tasks? → [ACTION: parallel] (30-90s, FASTEST for multi-task)
+- Need best answer from multiple perspectives? → [ACTION: council]
+- Complex project? → [ACTION: plan] → [ACTION: execute_plan]
 
-- "draw/generate picture/photo/image..." → [ACTION: image]
-- "edit/modify/change uploaded photo (background/color/add/remove)..." → [ACTION: image_edit]
-- "make video/shoot/animate..." → [ACTION: video]
-- "extend/continue video..." → [ACTION: video_extend]
-- "remind in.../set reminder/alarm..." → [ACTION: remind]
-- "add task/note task/todo..." → [ACTION: todo]
-- "search internet/google/search..." → use your knowledge or [ACTION: bash] curl
-- "run/execute command..." → [ACTION: bash]
-- "send file/show file..." → [ACTION: file]
-- "schedule in.../in N hours do..." → [ACTION: schedule]
-- "delegate/ask agent..." → [ACTION: delegate]
+**Step 4 — EXECUTE** with minimal overhead:
+- Simple → 1 action, done
+- Medium → delegate or parallel (2-3 agents max)
+- Complex → plan → parallel + sequential deps → synthesize
+
+### SPEED RULES (critical):
+- Do NOT use [ACTION: think] before simple tasks — just do them
+- Do NOT delegate greetings, yes/no questions, or factual answers
+- Launch parallel/council IMMEDIATELY — no preliminary think step
+- One planning step MAX before execution — avoid analysis paralysis
+- If you can answer in 1 sentence without actions — DO THAT
+
+IMPORTANT: The user communicates in NATURAL LANGUAGE. There are no commands. Map intent → action:
+
+**Media Creation:**
+- "draw/generate/create picture/photo/image/illustration/logo/banner/icon..." → [ACTION: image]
+- "edit/modify/change uploaded photo (background/color/add/remove/retouch)..." → [ACTION: image_edit]
+- "make video/shoot/animate/record/clip/reel..." → [ACTION: video]
+- "extend/continue/prolong video..." → [ACTION: video_extend]
+- "scenario/storyboard/script for video..." → [ACTION: delegate] role=content_creator
+
+⚠️ **CRITICAL — Media Tool Priority:**
+For ALL image generation, photo editing, and video creation tasks you MUST use ONLY the built-in ACTION tools:
+- [ACTION: image] — generate images (Flux, DALL-E, Midjourney, Imagen, etc.)
+- [ACTION: image_edit] — edit/modify uploaded photos
+- [ACTION: video] — generate videos (Veo 3, etc.)
+- [ACTION: video_extend] — extend existing videos
+NEVER use external MCP tools (Composio, Rube, COMPOSIO_SEARCH_TOOLS, RUBE_SEARCH_TOOLS, Nano Banana MCP, etc.) for media generation or editing. The built-in ACTIONs are faster, support all models, and handle the full pipeline automatically. External MCP tools are ONLY for non-media tasks like API integrations, messaging, data sync, etc.
+
+**Tasks & Scheduling:**
+- "remind in.../set reminder/alarm/notification..." → [ACTION: remind]
+- "add task/note task/todo/to-do list..." → [ACTION: todo]
+- "schedule in.../in N hours do.../run later..." → [ACTION: schedule]
+- "run in background/do in background/async..." → [ACTION: background]
+
+**Browser & Web Automation (2 движка на выбор):**
+- Движки: puppeteer (по умолчанию, запуск нового Chrome) | chrome_mcp (управление реальным Chrome через Claude CLI + MCP — с куками, авторизациями, расширениями)
+- Добавь "engine: chrome_mcp" к любой browse-команде для использования Chrome MCP
+- "check browser engines/какие браузеры..." → [ACTION: browse] action: engines
+- "switch to chrome_mcp/переключи движок..." → [ACTION: browse] action: engine\nset: chrome_mcp
+- "open site/go to/navigate to/visit URL..." → [ACTION: browse] action: goto
+- "click button/press/tap element..." → [ACTION: browse] action: click
+- "fill form/type text/enter value/login..." → [ACTION: browse] action: type or fill_form
+- "screenshot/take screenshot/show page..." → [ACTION: browse] action: screenshot
+- "scrape/extract data/get text from page..." → [ACTION: browse] action: extract
+- "run JS on page/evaluate script..." → [ACTION: browse] action: evaluate
+- "close browser/end session..." → [ACTION: browse] action: close
+
+**Code & System:**
+- "run/execute command/install/deploy/check..." → [ACTION: bash]
+- "write code/create app/build project/fix bug/debug..." → [ACTION: delegate] role=coder
+- "review code/check quality/find bugs..." → [ACTION: delegate] role=reviewer
+- "create website/landing/app/frontend..." → [ACTION: plan] → multi-agent
+
+**Knowledge & Files:**
+- "search internet/google/find info/research..." → [ACTION: delegate] researcher or use knowledge
+- "send file/show file/give me..." → [ACTION: file]
+- "analyze/research/report/compare..." → [ACTION: parallel] or [ACTION: council]
+- "translate/перевод/на английский..." → [ACTION: delegate] role=translator
+
+**Memory:**
 - "forget that.../delete from memory..." → [ACTION: memory] forget
-- "what do you remember about me/show memory..." → [ACTION: memory] list
-- "run in background/do in background..." → [ACTION: background]
+- "what do you remember/show memory..." → [ACTION: memory] list
+
+**Meta / Complex:**
+- "do X and Y and Z" (multiple tasks) → [ACTION: parallel]
+- "what's better: A or B?" (comparison) → [ACTION: council]
+- "create project with..." (multi-step) → [ACTION: plan] → [ACTION: execute_plan]
 
 Never say "use the /... command". Just do it.
 
@@ -6491,6 +6721,15 @@ text: what to forget (for forget)
 auto: true
 [/ACTION]
 
+[ACTION: browse]
+action: goto|click|type|screenshot|evaluate|wait|scroll|extract|cookies_set|cookies_get|fill_form|tabs|tab_switch|tab_new|close|status|engine|engines
+engine: puppeteer|chrome_mcp (optional, default: puppeteer. chrome_mcp управляет реальным Chrome через Claude CLI + MCP — сохраняет куки, авторизации, расширения)
+url: https://example.com (for goto)
+selector: CSS selector or text content (for click/type/extract/wait)
+value: text to type (for type/fill_form)
+script: JS code (for evaluate)
+[/ACTION]
+
 [ACTION: figma]
 command: get_file|render|discover|tokens
 parameters (depend on the command)
@@ -6507,13 +6746,16 @@ repeat=daily
 priority=2
 category=personal
 \`\`\`
-3. **schedule** — schedule action. Line 1: time (number + unit: 30, 2h, 1d). Line 2: action type (bash|image|video|remind|file|delegate|mcp). Line 3: body (command/prompt). Line 4: description: description. Example:
+3. **schedule** — schedule a deferred task. Two formats:
+**New format (agent-based, preferred):** named fields for full agent execution:
 \`\`\`
-2h
-image
-A beautiful sunset over mountains
-description: Generate sunset in 2 hours
+task: Описание задачи целиком
+delay: 30m (или 2h, 1d)
+context: Зачем отложить (опционально)
+notify: yes/no (опционально)
 \`\`\`
+This schedules a FULL AGENT CYCLE (runClaude) — the agent can use ALL actions when the task fires.
+**Legacy format:** Line 1: time, Line 2: action type (bash|image|video|remind|file|mcp|agent), Line 3+: body.
 3.1. **todo** — create task. Line 1: task text. Optional: priority=1-3, category=work|personal|urgent, due=30m|2h|1d (deadline).
 4. **file** — send file. One line — path.
 5. **skill** — user skill. Line 1: name, Line 2: context.
@@ -6524,7 +6766,7 @@ description: Generate sunset in 2 hours
 9. **video** — video generation. Body: prompt in English. Autofallback via Veo 3.1 Fast → Veo 3.1 → Veo 2. Generates 30-120 seconds. Can animate user's photo if it was uploaded/generated recently.
 10. **video_extend** — extend existing video. Body: prompt for continuation. Use ONLY when the user explicitly asks to extend/continue the video.
 11. **figma** — work with Figma design. Commands: discover <url_or_file_key> (file structure), get_file <file_key> [node_ids], render <file_key> <node_id1> <node_id2> (render to PNG), styles <file_key>, components <file_key>. Use discover to find node_id, then render to send the image.
-12. **plan** — decompose the task into subtasks with dependencies. Does not execute — only plans.
+12. **plan** — decompose the task into subtasks with dependencies. Does not execute — only plans. Format: goal: ..., then subtasks: - id: N, role: X, task: Y, priority: high|medium|low, deps: [N], schedule: 2h (optional — deferred execution).
 13. **parallel** — parallel execution of up to 8 subagents. Blocks separated by ---. Each agent automatically gets a DIFFERENT AI model. Add "discuss: yes" — for final meeting and synthesis. You can specify "model: X" for a specific agent.
 14. **create_agent** — create a temporary agent with a specialization. Available for delegate/parallel.
 15. **supervise** — check agent status, plan, progress. For coordination of complex tasks.
@@ -6533,6 +6775,25 @@ description: Generate sunset in 2 hours
 18. **memory** — memory management. Commands: forget (forget a fact by text), list (show all facts). For forget: "forget that I am from Moscow" → forget + "Moscow".
 19. **execute_plan** — automatically execute the plan created via [ACTION: plan]. Tasks without dependencies run in parallel, dependent ones wait.
 20. **council** — multi-model council. Several AI models solve the task SIMULTANEOUSLY, then synthesis the best answer. Fields: task (text), type: fast|balanced|powerful. For complex tasks.
+21. **todo_manage** — programmatic task management. Operations: add: task text, complete: id, list: true, update: id, delete: id. Fields: priority: 1-3, due: 2h, category: work|personal|urgent, status: pending|in_progress|done. Use this to track your own progress on complex tasks.
+22. **quality_check** — AI-powered self-verification. Fields: criteria: (list with - prefix), target: (text to evaluate). Returns QA PASS or QA FAIL. Use after completing important tasks to verify quality.
+23. **browse** — real browser automation via Chrome. Opens a visible browser, navigates pages, clicks, types, takes screenshots. Sub-commands:
+  - **goto**: navigate to URL. Fields: url. Auto-sends screenshot to chat. SSRF-protected.
+  - **click**: click element. Fields: selector (CSS) or text content fallback.
+  - **type**: type into input. Fields: selector, value. Clears field first.
+  - **screenshot**: capture current page. Optional: full: true (full page).
+  - **evaluate**: run JavaScript on page. Fields: script. Returns result.
+  - **wait**: wait for element or time. Fields: selector (CSS) or seconds (max 30).
+  - **scroll**: scroll page. Fields: direction (up/down), amount (pixels, default 500).
+  - **extract**: extract text/links from elements. Fields: selector.
+  - **fill_form**: batch fill form fields. Fields: fields (key: value pairs, one per line).
+  - **cookies_set**: set cookie. Fields: domain, name, value.
+  - **cookies_get**: list all cookies.
+  - **tabs**: list open tabs. **tab_switch**: switch tab by index. **tab_new**: open new tab with url.
+  - **close**: close browser session and save cookies.
+  - **status**: show session info.
+  Sessions persist cookies across restarts. Auto-close after 15 min idle. Admin-only.
+  Multi-step example: goto → type login → type password → click submit → screenshot.
 
 ## Multi-model Work Strategy
 
@@ -6712,48 +6973,80 @@ Subagent selection by task:
 - Social media → social_media
 
 Rules:
-1. ALWAYS delegate — you are an orchestrator, not a performer
-2. Before a complex task — use [ACTION: plan] for decomposition
-3. Independent subtasks (without deps) — launch via [ACTION: parallel] (each agent will automatically get ITS OWN model!)
-4. Dependent ones — via sequential [ACTION: delegate]
-5. Need a narrow specialist — create via [ACTION: create_agent]
-6. For control — [ACTION: supervise]
-7. Maximum 8 agents in parallel, timeout 90s per agent. Each will get ITS OWN model
-8. After parallel — analyze results and synthesize the output
-9. For simple questions without actions (hi, how are you, what is X) — answer yourself, without delegating
-10. For analytics/opinions — use [ACTION: council] for a multi-model meeting
-11. SPEED IS PARAMOUNT: do NOT waste steps on reflections before simple actions, just do it
+1. ALWAYS delegate work tasks — you are an orchestrator, not a performer
+2. EXCEPTION: simple questions (hi, what is X, yes/no) — answer yourself without delegating
+3. Before a complex task — use [ACTION: plan] for decomposition
+4. Independent subtasks — launch via [ACTION: parallel] (each agent auto-gets ITS OWN model!)
+5. Dependent subtasks — via sequential [ACTION: delegate]
+6. Need a narrow specialist — create via [ACTION: create_agent]
+7. For control — [ACTION: supervise]
+8. Maximum 8 agents in parallel, timeout 90s per agent
+9. After parallel — ALWAYS synthesize results into a coherent answer
+10. For analytics/opinions/comparisons — [ACTION: council] for multi-model voting
+11. SPEED IS PARAMOUNT: do NOT waste steps on reflections before simple actions
+12. NEVER delegate image/video/remind/schedule/todo/memory — execute those DIRECTLY
+13. If user asks "do X AND Y" — launch parallel immediately, don't ask clarification
 
 ## Context Understanding and Self-Improvement
 
-- **Dialog Context**: If the request is short or contains pronouns ("this", "him", "to Russian"), always consider previous messages. Do not answer in isolation.
+- **Dialog Context**: If the request is short or contains pronouns ("this", "him", "to Russian"), ALWAYS consider previous messages. Do not answer in isolation.
+- **Implicit Intent**: "продолжай"/"continue" = continue the LAST task. "ещё"/"more" = generate another variant. "другой"/"different" = change approach.
 - **User Corrections**: If the user says "no", "not like that", "I meant..." — this is a LEARNING SIGNAL. Correct your understanding and remember the lesson.
 - **Preferences**: Remember the user's communication style (concise/detailed, formal/conversational) and adapt.
 - **Negative Feedback**: If the user is dissatisfied ("wrong", "bad", "don't do that") — extract the instruction and correct your behavior.
 - **Memory**: You have access to long-term memory about the user. Instructions from memory (category: instruction) have TOP PRIORITY — always follow them.
 - **Result**: NEVER answer with an empty "Task completed" without a result. Always show the concrete result of an action.
 
-## CRITICAL RULE: Never give up
+## Response Quality Guidelines
 
-- FORBIDDEN to say "I cannot", "it is impossible", "the tool doesn't work".
-- On an action error — analyze the error type:
-  * TIMEOUT → simplify the command, split into parts, remove unnecessary pipes
-  * PERMISSION DENIED → use another directory or delegate executor
-  * COMMAND NOT FOUND → use an alternative (node -e instead of python, curl instead of wget)
-  * API ERROR → try another API or another method
-  * FILE NOT FOUND → create the file via bash, then try again
-- On [ACTION: image] error — the system HAS ALREADY cycled through all 8 models. If still an error:
-  1. Rewrite the prompt (simplify, remove controversial content, translate to English)
-  2. Try [ACTION: image] again with the new prompt
-  3. SVG via node -e (for schemes/diagrams)
-  4. DO NOT generate HTML/code as a substitute for a photo
-- On [ACTION: video] error — the system has cycled through all 3 Veo models. If error:
-  1. Simplify the prompt (remove complex scenes, people)
-  2. Try [ACTION: video] with a short prompt in English
-  3. Offer to generate an image instead of a video
-- You ALWAYS come back with a result. You have enough tools: bash, delegate, image, video, file, skill.
-- If 2 attempts of the same approach fail — CHANGE THE APPROACH COMPLETELY.
-- The user MUST NEVER see raw code instead of a result.`;
+1. **Be concise**: Lead with the answer or result, not the reasoning. 5-15 words before ACTION.
+2. **Be specific**: "Created file server.js with Express on port 3000" not "The task has been completed".
+3. **Be structured**: For lists/comparisons use formatting. For code — delegate to coder.
+4. **Be proactive**: If a request implies follow-up steps, mention them. "File created. Want me to deploy it?"
+5. **Handle errors gracefully**: On error, show what went wrong and what you're doing differently.
+6. **Match language**: ALWAYS respond in the user's language. If they write in Russian — respond in Russian.
+7. **No filler**: Never start with "Certainly!", "Of course!", "Sure!" — go straight to the point.
+
+## ⚡ CRITICAL RULE: NEVER GIVE UP — ACHIEVE RESULTS NO MATTER WHAT
+
+### Mindset
+- You are a PROBLEM SOLVER, not a reporter of failures.
+- FORBIDDEN to say "I cannot", "it is impossible", "the tool doesn't work", "I was unable to".
+- EVERY task has a solution. If the direct path fails — find an indirect one.
+- The user hired you to GET RESULTS, not to explain why something failed.
+
+### Error Recovery Strategy (apply in order)
+1. **Same tool, different params** — change command, flags, syntax, wording
+2. **Alternative tool** — bash↔delegate, web_fetch↔curl, search↔web_fetch
+3. **Decompose** — break big task into 2-3 smaller independent tasks
+4. **Delegate** — pass to a specialist subagent (coder, executor, researcher)
+5. **Creative workaround** — node -e instead of python, SVG instead of image API, curl instead of fetch
+6. **Partial result** — deliver what you CAN, then explain what's pending
+
+### Error-Specific Playbook
+| Error | Action 1 | Action 2 | Action 3 |
+|-------|----------|----------|----------|
+| TIMEOUT | Split command, add timeout flag | node -e alternative | delegate executor |
+| PERMISSION DENIED | Use /tmp/, change directory | delegate executor | create via heredoc |
+| COMMAND NOT FOUND | node -e, npx, full path /opt/homebrew/bin/ | curl | delegate |
+| API ERROR | Different API/endpoint | bash curl | web_fetch |
+| FILE NOT FOUND | mkdir -p + create | find/ls to locate | bash heredoc |
+| IMAGE FAILED | Rewrite prompt radically (short English) | Try again | SVG via node -e |
+| VIDEO FAILED | Simplify prompt (1 sentence English) | Try again | Offer image instead |
+| DELEGATE FAILED | Different role | Simpler task description | Do it yourself via bash |
+| MCP FAILED | Check server ID | bash curl API directly | delegate |
+
+### Persistence Rules
+- After 1 failed attempt: retry with MODIFIED parameters
+- After 2 failed attempts of same approach: SWITCH to a completely different tool/action
+- After 3+ failures: DECOMPOSE the task or DELEGATE to specialist
+- NEVER repeat the EXACT same action that already failed
+- NEVER give up without trying at least 3 DIFFERENT approaches
+- ALWAYS provide the user with SOMETHING — even a partial result is better than "failed"
+- If ALL automated approaches fail, explain what you tried and suggest a manual alternative
+
+### The Golden Rule
+**The user must ALWAYS receive a concrete result or a clear next step — NEVER just an error message.**`;
 
 // === Agent: парсинг действий ===
 function parseAction(text) {
@@ -6816,56 +7109,92 @@ const validateActionBody = (actionName, body) => {
 };
 
 // === Error-type-aware retry guidance + self-learning ===
-const getRetryGuidance = (actionName, errorOutput) => {
+// Таблица альтернативных действий — если основное не работает
+const ACTION_ALTERNATIVES = {
+  bash: ['delegate', 'mcp'],
+  image: ['delegate', 'bash'], // SVG через node -e
+  video: ['image'], // fallback на изображение
+  file: ['bash'],
+  mcp: ['bash', 'delegate', 'web_fetch'],
+  read_file: ['bash'],
+  edit_file: ['bash', 'write_file'],
+  write_file: ['bash'],
+  web_fetch: ['bash', 'search', 'delegate'],
+  http_request: ['bash', 'web_fetch'],
+  search: ['web_fetch', 'delegate', 'bash'],
+  delegate: ['parallel', 'bash', 'council'],
+  parallel: ['delegate'],
+  plan: ['delegate', 'parallel'],
+};
+
+const getRetryGuidance = (actionName, errorOutput, retryCount = 0) => {
   const err = errorOutput.toLowerCase();
-  const base = 'Действие не удалось. ЗАПРЕЩЕНО сдаваться. ';
+  const base = '⚠️ ДЕЙСТВИЕ НЕ УДАЛОСЬ. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО СДАВАТЬСЯ. ';
   let guidance = '';
+
+  // Уровень агрессивности зависит от номера попытки
+  const escalation = retryCount >= 2
+    ? '\n\n🔥 КРИТИЧЕСКАЯ ЭСКАЛАЦИЯ: Это уже попытка #' + (retryCount + 1) + '. КАРДИНАЛЬНО смени подход. Используй СОВЕРШЕННО ДРУГОЕ действие. '
+    : '';
+
+  // Альтернативные действия для подсказки
+  const alts = ACTION_ALTERNATIVES[actionName] || ['bash', 'delegate'];
+  const altHint = `\n\n💡 Альтернативные действия: ${alts.map(a => `[ACTION: ${a}]`).join(', ')}`;
 
   if (actionName === 'bash') {
     if (err.includes('тайм-аут') || err.includes('timeout'))
-      guidance = `${base}Команда зависла. Оптимизируй: разбей на части, убери pipe в pipe, добавь timeout, или используй другой подход.`;
+      guidance = `${base}Команда зависла. СТРАТЕГИИ: 1) Разбей на 2-3 мелких команды. 2) Добавь timeout 10. 3) Убери лишние pipe. 4) Используй node -e вместо сложных bash-конструкций.${escalation}`;
     else if (err.includes('permission denied') || err.includes('запрещён'))
-      guidance = `${base}Нет прав. Попробуй: другую директорию или другую команду.`;
+      guidance = `${base}Нет прав. СТРАТЕГИИ: 1) Используй /tmp/ директорию. 2) Делегируй executor субагенту. 3) Создай файл в рабочей директории. 4) Используй node -e для обхода ограничений shell.${escalation}`;
     else if (err.includes('not found') || err.includes('command not found'))
-      guidance = `${base}Команда не найдена. Используй альтернативу (node -e вместо python, curl вместо wget). Помни: Python НЕ установлен.`;
+      guidance = `${base}Команда не найдена. АЛЬТЕРНАТИВЫ: node -e (вместо python), curl (вместо wget), npx (для npm-пакетов), /opt/homebrew/bin/ (полные пути). Python НЕ установлен — используй ТОЛЬКО node.${escalation}`;
     else if (err.includes('заблокировано') || err.includes('blocked'))
-      guidance = `${base}Команда заблокирована. Используй безопасную альтернативу.`;
+      guidance = `${base}Команда заблокирована. Используй безопасную альтернативу: node -e, curl, или делегируй через [ACTION: delegate] role=executor.${escalation}`;
+    else if (err.includes('enoent') || err.includes('no such file'))
+      guidance = `${base}Файл/директория не существует. 1) Создай через mkdir -p. 2) Проверь путь через ls. 3) Используй абсолютные пути.${escalation}`;
     else
-      guidance = `${base}Измени команду: используй другой синтаксис, другие флаги, или разбей на подкоманды.`;
+      guidance = `${base}Измени подход: 1) Другой синтаксис/флаги. 2) Разбей на подкоманды. 3) node -e вместо bash. 4) Делегируй специалисту.${escalation}`;
   } else if (actionName === 'image')
-    guidance = `${base}Генерация изображения не удалась. Создай визуал через bash (SVG через node -e, или HTML-макет). НЕ отправляй сырой код пользователю.`;
+    guidance = `${base}Генерация изображения не удалась (все модели уже перебраны). СТРАТЕГИИ: 1) Полностью перепиши промпт — проще, короче, на English. 2) Убери спорный контент. 3) SVG через node -e для диаграмм. 4) Попробуй [ACTION: image] ещё раз с радикально другим описанием.${escalation}`;
+  else if (actionName === 'video')
+    guidance = `${base}Видео не удалось. СТРАТЕГИИ: 1) Упрости промпт до 1-2 предложений. 2) Убери людей/лица из описания. 3) Попробуй короткий промпт только на English. 4) Предложи [ACTION: image] как альтернативу.${escalation}`;
   else if (actionName === 'file')
-    guidance = `${base}Файл не найден или недоступен. Создай файл через [ACTION: bash], затем отправь через [ACTION: file].`;
+    guidance = `${base}Файл недоступен. 1) Проверь путь через [ACTION: bash] ls. 2) Создай файл через bash. 3) Используй абсолютный путь.${escalation}`;
   else if (actionName === 'mcp') {
     if (err.includes('не найден') || err.includes('not found'))
-      guidance = `${base}MCP-сервер не найден. Проверь id/имя сервера в списке интеграций (Настройки → Интеграции). Используй server: с точным id или именем из списка.`;
+      guidance = `${base}MCP-сервер не найден. 1) Проверь точный id в Настройках → Интеграции. 2) Попробуй без server:, только tool:. 3) Альтернатива: [ACTION: bash] curl для API, [ACTION: delegate] для задачи.${escalation}`;
     else if (err.includes('http') || err.includes('econnrefused') || err.includes('timeout'))
-      guidance = `${base}MCP-сервер недоступен. Проверь URL и ключ в Настройках → Интеграции, или попробуй другой инструмент/действие.`;
+      guidance = `${base}MCP-сервер недоступен. 1) Попробуй через 5 секунд (sleep 5 в bash). 2) Используй [ACTION: bash] curl для прямого API. 3) Делегируй задачу субагенту.${escalation}`;
     else
-      guidance = `${base}Ошибка MCP. Проверь формат: server: <id>, tool: <имя>, args: {}. Или используй другой способ выполнить задачу.`;
+      guidance = `${base}Ошибка MCP. 1) Проверь формат args (JSON). 2) Попробуй другой tool на том же сервере. 3) Используй [ACTION: bash] или [ACTION: delegate] как альтернативу.${escalation}`;
   } else if (actionName === 'read_file') {
-    if (err.includes('не найден')) guidance = `${base}Файл не найден. Проверь путь через [ACTION: bash] ls`;
-    else if (err.includes('бинарный')) guidance = `${base}Файл бинарный. Отправь через [ACTION: file]`;
-    else guidance = `${base}Попробуй другой путь или используй [ACTION: bash] cat`;
+    if (err.includes('не найден')) guidance = `${base}Файл не найден. 1) [ACTION: bash] ls для поиска. 2) [ACTION: bash] find для рекурсивного поиска. 3) Создай файл если нужно.${escalation}`;
+    else if (err.includes('бинарный')) guidance = `${base}Файл бинарный. Отправь через [ACTION: file] без чтения.${escalation}`;
+    else guidance = `${base}1) [ACTION: bash] cat файл. 2) Другой путь. 3) [ACTION: bash] find для поиска.${escalation}`;
   } else if (actionName === 'edit_file') {
-    if (err.includes('old_text не найден')) guidance = `${base}Текст не найден. Сначала прочитай файл через [ACTION: read_file], затем скопируй точный текст для замены.`;
-    else guidance = `${base}Проверь формат: path:, old_text:, new_text: — каждое на новой строке.`;
+    if (err.includes('old_text не найден')) guidance = `${base}Текст не найден. ОБЯЗАТЕЛЬНО: 1) [ACTION: read_file] чтобы увидеть ТОЧНОЕ содержимое. 2) Скопируй текст ТОЧНО как есть. 3) Или используй [ACTION: bash] sed/node -e для замены.${escalation}`;
+    else guidance = `${base}1) Проверь формат: path:, old_text:, new_text: на отдельных строках. 2) Или [ACTION: bash] для прямого редактирования. 3) Или [ACTION: write_file] для перезаписи.${escalation}`;
   } else if (actionName === 'write_file') {
-    guidance = `${base}Проверь формат: path: и content: на отдельных строках. Или используй [ACTION: bash] для создания файла.`;
+    guidance = `${base}1) Проверь формат: path: и content:. 2) [ACTION: bash] для создания через heredoc/echo. 3) Проверь что директория существует (mkdir -p).${escalation}`;
   } else if (actionName === 'web_fetch') {
-    if (err.includes('timeout')) guidance = `${base}Сайт не отвечает. Попробуй [ACTION: bash] curl --max-time 10`;
-    else guidance = `${base}Ошибка загрузки. Проверь URL или используй [ACTION: search] для поиска информации.`;
+    if (err.includes('timeout')) guidance = `${base}Сайт не отвечает. 1) [ACTION: bash] curl --max-time 10 URL. 2) [ACTION: search] для поиска альтернативного источника. 3) [ACTION: delegate] role=researcher.${escalation}`;
+    else guidance = `${base}1) Проверь URL. 2) [ACTION: bash] curl. 3) [ACTION: search] для поиска. 4) Другой источник информации.${escalation}`;
   } else if (actionName === 'http_request') {
-    if (err.includes('timeout')) guidance = `${base}Сервер не отвечает. Попробуй [ACTION: bash] curl.`;
-    else guidance = `${base}Проверь URL, метод, headers и body. Формат headers: JSON-объект.`;
+    if (err.includes('timeout')) guidance = `${base}Сервер не отвечает. 1) [ACTION: bash] curl с timeout. 2) Другой endpoint. 3) Повторить через 5с.${escalation}`;
+    else guidance = `${base}1) Проверь URL, метод, headers, body. 2) [ACTION: bash] curl как альтернатива. 3) Упрости запрос.${escalation}`;
   } else if (actionName === 'search') {
-    guidance = `${base}Поиск не удался. Попробуй переформулировать запрос или используй [ACTION: web_fetch] с конкретным URL.`;
+    guidance = `${base}Поиск не удался. 1) Переформулируй запрос (короче, другие слова). 2) [ACTION: web_fetch] с конкретным URL. 3) [ACTION: delegate] role=researcher. 4) [ACTION: bash] curl для прямого доступа.${escalation}`;
   } else if (actionName === 'delegate') {
-    guidance = `${base}Субагент не справился. Попробуй другую роль, упрости задачу, или выполни сам через [ACTION: bash].`;
+    guidance = `${base}Субагент не справился. 1) ДРУГАЯ роль (coder→executor, researcher→data_analyst). 2) Упрости задачу в 2 раза. 3) [ACTION: parallel] с 2-3 субагентами. 4) Выполни сам через [ACTION: bash].${escalation}`;
+  } else if (actionName === 'parallel') {
+    guidance = `${base}Параллельное выполнение не удалось. 1) Запусти задачи последовательно через [ACTION: delegate]. 2) Уменьши количество агентов. 3) Увеличь timeout. 4) Упрости задачи.${escalation}`;
   } else
-    guidance = `${base}Найди альтернативный подход. Используй другое действие или измени параметры.`;
+    guidance = `${base}НАЙДИ АЛЬТЕРНАТИВУ: ${alts.map(a => `[ACTION: ${a}]`).join(', ')}. Измени подход полностью.${escalation}`;
 
-  // Опыт через Zep — семантический поиск при prefetch
+  // Добавляем альтернативы если не упомянуты в guidance
+  if (!guidance.includes('Альтернативн') && retryCount >= 1) {
+    guidance += altHint;
+  }
 
   return guidance;
 };
@@ -6904,10 +7233,10 @@ const estimateComplexity = (text, agentEnabled, chatId = null) => {
     }
   }
 
-  if (score <= 2) return { maxSteps: 4, complexity: 'simple' };
-  if (score <= 5) return { maxSteps: 7, complexity: 'medium' };
-  if (score <= 8) return { maxSteps: 10, complexity: 'complex' };
-  return { maxSteps: 15, complexity: 'very_complex' };
+  if (score <= 2) return { maxSteps: 10, complexity: 'simple' };
+  if (score <= 5) return { maxSteps: 20, complexity: 'medium' };
+  if (score <= 8) return { maxSteps: 30, complexity: 'complex' };
+  return { maxSteps: 50, complexity: 'very_complex' };
 };
 
 // === Agent: выполнение действий ===
@@ -7010,7 +7339,7 @@ function executeBashAction(cmd, workDir) {
 }
 
 // Автоотправка файлов, упомянутых в тексте ответа, в Telegram
-function autoSendMentionedFiles(chatId, text) {
+async function autoSendMentionedFiles(chatId, text) {
   if (!text) return;
   const pathRegex = /(\/[\w./-]+\.(?:png|jpg|jpeg|gif|webp|mp4|mov|webm|pdf|html|csv|json|txt|md|zip|tar|gz|svg|mp3|wav|ogg|m4a))/gi;
   const matches = text.match(pathRegex);
@@ -7021,13 +7350,13 @@ function autoSendMentionedFiles(chatId, text) {
     if (seen.has(clean)) continue;
     seen.add(clean);
     try {
-      if (!fs.existsSync(clean)) continue;
+      await fs.promises.access(clean, fs.constants.R_OK);
       const ext = path.extname(clean).slice(1).toLowerCase();
       if (['mp4', 'webm', 'mov'].includes(ext)) sendVideo(chatId, clean, path.basename(clean));
       else if (['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext)) sendPhoto(chatId, clean, path.basename(clean));
       else if (['mp3', 'wav', 'ogg', 'm4a'].includes(ext)) sendAudio(chatId, clean, path.basename(clean));
       else sendDocument(chatId, clean, path.basename(clean));
-    } catch (e) { console.error(`autoSendMentionedFiles: ${e.message}`); }
+    } catch (e) { if (e.code !== 'ENOENT') console.error(`autoSendMentionedFiles: ${e.message}`); }
   }
 }
 
@@ -7093,6 +7422,36 @@ function executeRemindAction(chatId, body) {
 
 function executeScheduleAction(chatId, body) {
   const lines = body.split('\n');
+
+  // Новый формат с именованными полями: task:, delay:, context:, notify:
+  const taskLine = lines.find(l => /^task:\s*/i.test(l));
+  const delayLine = lines.find(l => /^delay:\s*/i.test(l));
+
+  if (taskLine && delayLine) {
+    // ── Новый формат (agent-based) ──
+    const task = taskLine.replace(/^task:\s*/i, '').trim();
+    const delayStr = delayLine.replace(/^delay:\s*/i, '').trim();
+    const delayMs = parseTimeString(delayStr);
+    if (!delayMs) return { success: false, output: 'Ошибка: неверный формат delay (примеры: 30m, 2h, 1d)' };
+    if (delayMs < 60000) return { success: false, output: 'Ошибка: минимум 1 минута' };
+
+    const contextLine = lines.find(l => /^context:\s*/i.test(l));
+    const notifyLine = lines.find(l => /^notify:\s*/i.test(l));
+    const context = contextLine ? contextLine.replace(/^context:\s*/i, '').trim() : '';
+    const notify = notifyLine ? notifyLine.replace(/^notify:\s*/i, '').trim().toLowerCase() !== 'no' : true;
+
+    const id = nextScheduleId++;
+    const fireAt = Date.now() + delayMs;
+    if (!config.scheduledActions) config.scheduledActions = [];
+    config.scheduledActions.push({ id, chatId, actionName: 'agent', actionBody: task, description: task.slice(0, 80), context, notify, fireAt });
+    saveConfig();
+    const timerId = setTimeout(() => fireScheduledAction(id), delayMs);
+    scheduledTimers.set(id, timerId);
+    const notifyNote = notify ? '' : ' (без уведомления)';
+    return { success: true, output: `⏰ Агентная задача #${id} запланирована через ${formatTimeLeft(delayMs)}${notifyNote}: "${task.slice(0, 100)}"` };
+  }
+
+  // ── Старый формат (обратная совместимость) ──
   const delayMs = parseTimeString(lines[0] || '');
   if (!delayMs) return { success: false, output: 'Ошибка: строка 1: время (число или "2ч", "1д")' };
   if (delayMs < 60000) return { success: false, output: 'Ошибка: минимум 1 минута' };
@@ -7104,7 +7463,7 @@ function executeScheduleAction(chatId, body) {
   if (!actionName || !actionBody) {
     return { success: false, output: 'Ошибка: строка 1: время, строка 2: тип действия, строка 3+: тело действия' };
   }
-  const allowedActions = ['bash', 'image', 'video', 'remind', 'file', 'mcp'];
+  const allowedActions = ['bash', 'image', 'video', 'remind', 'file', 'mcp', 'agent'];
   if (!allowedActions.includes(actionName)) {
     return { success: false, output: `Допустимые действия: ${allowedActions.join(', ')}` };
   }
@@ -7159,6 +7518,132 @@ function executeTodoAction(chatId, body) {
   return { success: true, output: msg };
 }
 
+function executeTodoManageAction(chatId, body) {
+  const lines = body.split('\n');
+  const fields = {};
+  for (const line of lines) {
+    const m = line.match(/^(add|complete|list|update|delete|priority|due|category|status|text)\s*:\s*(.+)/i);
+    if (m) fields[m[1].toLowerCase()] = m[2].trim();
+  }
+
+  if (!config.todos) config.todos = [];
+
+  // ── LIST ──
+  if (fields.list) {
+    const filter = fields.category || fields.status;
+    let todos = config.todos.filter(t => t.chatId === chatId);
+    if (fields.status) todos = todos.filter(t => t.status === fields.status);
+    if (fields.category) todos = todos.filter(t => t.category === fields.category);
+    if (!todos.length) return { success: true, output: '📋 Нет задач' + (filter ? ` с фильтром "${filter}"` : '') };
+    const PRIORITY_ICONS = { 1: '⚪', 2: '🟡', 3: '🔴' };
+    const STATUS_ICONS = { pending: '⬜', done: '✅', in_progress: '🔄', cancelled: '❌' };
+    const list = todos.map(t => {
+      const pi = PRIORITY_ICONS[t.priority] || '⚪';
+      const si = STATUS_ICONS[t.status] || '⬜';
+      const due = t.dueAt ? ` ⏰${new Date(t.dueAt).toLocaleDateString('ru')}` : '';
+      return `${si} #${t.id} ${pi} ${t.text}${due}`;
+    }).join('\n');
+    return { success: true, output: `📋 Задачи (${todos.length}):\n${list}` };
+  }
+
+  // ── ADD ──
+  if (fields.add) {
+    const priority = fields.priority ? Math.min(3, Math.max(1, parseInt(fields.priority) || 1)) : 1;
+    const category = fields.category || 'general';
+    let dueAt = null;
+    if (fields.due) {
+      const dueMs = parseTimeString(fields.due);
+      if (dueMs) dueAt = Date.now() + dueMs;
+    }
+    const id = nextTodoId++;
+    config.todos.push({ id, chatId, text: fields.add, status: 'pending', createdAt: Date.now(), priority, category, dueAt });
+    saveConfig();
+    return { success: true, output: `📋 Задача #${id} создана: ${fields.add}` };
+  }
+
+  // ── COMPLETE ──
+  if (fields.complete) {
+    const tid = parseInt(fields.complete);
+    const todo = config.todos.find(t => t.id === tid && t.chatId === chatId);
+    if (!todo) return { success: false, output: `Задача #${tid} не найдена` };
+    todo.status = 'done';
+    todo.completedAt = Date.now();
+    saveConfig();
+    return { success: true, output: `✅ Задача #${tid} завершена: ${todo.text}` };
+  }
+
+  // ── UPDATE ──
+  if (fields.update) {
+    const tid = parseInt(fields.update);
+    const todo = config.todos.find(t => t.id === tid && t.chatId === chatId);
+    if (!todo) return { success: false, output: `Задача #${tid} не найдена` };
+    if (fields.text) todo.text = fields.text;
+    if (fields.priority) todo.priority = Math.min(3, Math.max(1, parseInt(fields.priority) || todo.priority));
+    if (fields.category) todo.category = fields.category;
+    if (fields.status) todo.status = fields.status;
+    if (fields.due) {
+      const dueMs = parseTimeString(fields.due);
+      if (dueMs) todo.dueAt = Date.now() + dueMs;
+    }
+    saveConfig();
+    return { success: true, output: `📝 Задача #${tid} обновлена` };
+  }
+
+  // ── DELETE ──
+  if (fields.delete) {
+    const tid = parseInt(fields.delete);
+    const idx = config.todos.findIndex(t => t.id === tid && t.chatId === chatId);
+    if (idx === -1) return { success: false, output: `Задача #${tid} не найдена` };
+    config.todos.splice(idx, 1);
+    saveConfig();
+    return { success: true, output: `🗑 Задача #${tid} удалена` };
+  }
+
+  return { success: false, output: 'Укажите операцию: add, complete, list, update или delete' };
+}
+
+async function executeQualityCheckAction(chatId, body) {
+  const lines = body.split('\n');
+  const fields = { criteria: [], target: '' };
+  let inCriteria = false;
+  for (const line of lines) {
+    const targetMatch = line.match(/^target:\s*(.+)/i);
+    if (targetMatch) { fields.target = targetMatch[1].trim(); inCriteria = false; continue; }
+    if (/^criteria:\s*$/i.test(line)) { inCriteria = true; continue; }
+    if (inCriteria && /^-\s+/.test(line)) { fields.criteria.push(line.replace(/^-\s+/, '').trim()); continue; }
+    if (/^criteria:\s*(.+)/i.test(line)) {
+      fields.criteria.push(line.replace(/^criteria:\s*/i, '').trim());
+      continue;
+    }
+  }
+
+  if (!fields.criteria.length) return { success: false, output: 'Укажите criteria (список критериев)' };
+  if (!fields.target) return { success: false, output: 'Укажите target (что проверять)' };
+
+  const prompt = `You are a quality control inspector. Evaluate the following work against the given criteria.
+
+TARGET (work to evaluate):
+${fields.target}
+
+CRITERIA:
+${fields.criteria.map((c, i) => `${i + 1}. ${c}`).join('\n')}
+
+For each criterion, respond:
+- ✅ PASS: [brief reason]
+- ❌ FAIL: [what's wrong]
+
+Then give overall verdict: QA PASS or QA FAIL
+Keep response concise (under 500 chars).`;
+
+  try {
+    const result = await callAI('gemini-2.5-flash', [{ role: 'user', content: prompt }], 'You are a strict QA inspector.', false, chatId);
+    const verdict = result.includes('QA FAIL') ? '❌ QA FAIL' : '✅ QA PASS';
+    return { success: true, output: `🔍 Проверка качества:\n${result.slice(0, 1500)}\n\n${verdict}` };
+  } catch (e) {
+    return { success: false, output: `Ошибка QA: ${e.message}` };
+  }
+}
+
 async function executeSearchAction(query, chatId) {
   const uc = chatId ? getUserConfig(chatId) : {};
   const key = uc.apiKeys?.google || process.env.GEMINI_API_KEY;
@@ -7195,16 +7680,15 @@ async function executeSearchAction(query, chatId) {
   }
 }
 
-function executeFileAction(chatId, filePath) {
+async function executeFileAction(chatId, filePath) {
   const uc = getUserConfig(chatId);
-  // Берём только первую строку как путь (защита от конкатенации контента с путём)
   const cleanPath = filePath.split('\n')[0].trim();
   const resolvedWorkDir = path.resolve(uc.workDir) + path.sep;
   const resolved = path.resolve(uc.workDir, cleanPath);
   if (!resolved.startsWith(resolvedWorkDir) && resolved !== path.resolve(uc.workDir)) {
     return { success: false, output: 'Доступ запрещён: файл вне рабочей директории' };
   }
-  if (!fs.existsSync(resolved)) {
+  try { await fs.promises.access(resolved, fs.constants.R_OK); } catch (_) {
     return { success: false, output: `Файл не найден: ${resolved}. Убедись, что файл создан через [ACTION: bash] перед отправкой.` };
   }
   sendDocument(chatId, resolved);
@@ -7213,7 +7697,7 @@ function executeFileAction(chatId, filePath) {
 
 // === OpenClaw-like File Tools ===
 
-function executeReadFileAction(chatId, body) {
+async function executeReadFileAction(chatId, body) {
   const lines = body.split('\n').map(l => l.trim()).filter(Boolean);
   let filePath = lines[0];
   let offset = 0;
@@ -7231,19 +7715,19 @@ function executeReadFileAction(chatId, body) {
   const sec = resolveSecurePath(chatId, filePath);
   if (sec.error) return { success: false, output: sec.error };
   const resolved = sec.resolved;
-  if (!fs.existsSync(resolved)) return { success: false, output: `Файл не найден: ${resolved}` };
-  const stat = fs.statSync(resolved);
+  let stat;
+  try { stat = await fs.promises.stat(resolved); } catch (e) { return { success: false, output: `Файл не найден: ${resolved}` }; }
   if (stat.isDirectory()) return { success: false, output: `${resolved} — директория. Используй [ACTION: bash] ls` };
   if (stat.size > 10 * 1024 * 1024) return { success: false, output: `Файл слишком большой (${(stat.size / 1024 / 1024).toFixed(1)}MB). Используй offset/limit` };
   // Binary detection
+  const fh = await fs.promises.open(resolved, 'r');
   const sample = Buffer.alloc(512);
-  const fd = fs.openSync(resolved, 'r');
-  const bytesRead = fs.readSync(fd, sample, 0, 512, 0);
-  fs.closeSync(fd);
+  const { bytesRead } = await fh.read(sample, 0, 512, 0);
+  await fh.close();
   if (sample.slice(0, bytesRead).filter(b => b === 0).length > bytesRead * 0.1) {
     return { success: false, output: `Файл бинарный (${stat.size} bytes). Отправь через [ACTION: file]` };
   }
-  const content = fs.readFileSync(resolved, 'utf-8');
+  const content = await fs.promises.readFile(resolved, 'utf-8');
   const allLines = content.split('\n');
   const totalLines = allLines.length;
   const sliced = allLines.slice(offset, offset + limit);
@@ -7254,7 +7738,7 @@ function executeReadFileAction(chatId, body) {
   return { success: true, output: truncateOutput(output) };
 }
 
-function executeWriteFileAction(chatId, body) {
+async function executeWriteFileAction(chatId, body) {
   const pathMatch = body.match(/^path:\s*(.+)/im);
   if (!pathMatch) return { success: false, output: 'write_file: требуется поле "path:"' };
   const filePath = pathMatch[1].trim();
@@ -7271,32 +7755,33 @@ function executeWriteFileAction(chatId, body) {
   }
   const dir = path.dirname(resolved);
   try {
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    const existed = fs.existsSync(resolved);
-    fs.writeFileSync(resolved, content, 'utf-8');
+    await fs.promises.mkdir(dir, { recursive: true });
+    let existed = false;
+    try { await fs.promises.access(resolved); existed = true; } catch (_) {}
+    await fs.promises.writeFile(resolved, content, 'utf-8');
     const lineCount = content.split('\n').length;
-    const stat = fs.statSync(resolved);
+    const stat = await fs.promises.stat(resolved);
     return { success: true, output: `${existed ? '✏️ Перезаписан' : '📝 Создан'}: ${resolved} (${lineCount} строк, ${stat.size} bytes)` };
   } catch (e) {
     return { success: false, output: `Ошибка записи файла: ${e.message}` };
   }
 }
 
-function executeEditFileAction(chatId, body) {
+async function executeEditFileAction(chatId, body) {
   const pathMatch = body.match(/^path:\s*(.+)/im);
   if (!pathMatch) return { success: false, output: 'edit_file: требуется поле "path:"' };
   const filePath = pathMatch[1].trim();
   const sec = resolveSecurePath(chatId, filePath);
   if (sec.error) return { success: false, output: sec.error };
   const resolved = sec.resolved;
-  if (!fs.existsSync(resolved)) return { success: false, output: `Файл не найден: ${resolved}` };
+  try { await fs.promises.access(resolved); } catch (_) { return { success: false, output: `Файл не найден: ${resolved}` }; }
   const oldMatch = body.match(/old_text:\s*\n([\s\S]*?)(?=\nnew_text:)/i);
   const newMatch = body.match(/new_text:\s*\n([\s\S]*?)$/i);
   if (!oldMatch) return { success: false, output: 'edit_file: требуется поле "old_text:"' };
   if (!newMatch) return { success: false, output: 'edit_file: требуется поле "new_text:"' };
   const oldText = oldMatch[1];
   const newText = newMatch[1];
-  let content = fs.readFileSync(resolved, 'utf-8');
+  let content = await fs.promises.readFile(resolved, 'utf-8');
   if (!content.includes(oldText)) {
     const trimmedOld = oldText.trim();
     if (trimmedOld && content.includes(trimmedOld)) {
@@ -7307,7 +7792,7 @@ function executeEditFileAction(chatId, body) {
   } else {
     content = content.replace(oldText, newText);
   }
-  fs.writeFileSync(resolved, content, 'utf-8');
+  await fs.promises.writeFile(resolved, content, 'utf-8');
   const lineCount = content.split('\n').length;
   return { success: true, output: `✅ Файл изменён: ${resolved} (${lineCount} строк)` };
 }
@@ -7360,9 +7845,9 @@ async function executePlanAction(chatId, body, statusUpdater) {
   const goalMatch = body.match(/goal:\s*(.+)/i);
   const goal = goalMatch ? goalMatch[1].trim() : 'Цель не указана';
 
-  const subtaskMatches = [...body.matchAll(/- id:\s*(\d+),\s*role:\s*([\w\-а-яёА-ЯЁ]+),\s*task:\s*(.+?)(?:,\s*priority:\s*(\w+))?(?:,\s*deps:\s*\[([^\]]*)\])?$/gm)];
+  const subtaskMatches = [...body.matchAll(/- id:\s*(\d+),\s*role:\s*([\w\-а-яёА-ЯЁ]+),\s*task:\s*(.+?)(?:,\s*priority:\s*(\w+))?(?:,\s*deps:\s*\[([^\]]*)\])?(?:,\s*schedule:\s*(\S+))?$/gm)];
   if (subtaskMatches.length === 0) {
-    return { success: false, output: 'plan: подзадачи не найдены. Формат: - id: N, role: X, task: Y, deps: [N]' };
+    return { success: false, output: 'plan: подзадачи не найдены. Формат: - id: N, role: X, task: Y, deps: [N], schedule: 2h' };
   }
 
   const plan = {
@@ -7373,6 +7858,7 @@ async function executePlanAction(chatId, body, statusUpdater) {
       task: m[3].trim(),
       priority: (m[4] || 'medium').trim(),
       deps: m[5] ? m[5].split(',').map(d => parseInt(d.trim())).filter(Boolean) : [],
+      schedule: m[6] ? m[6].trim() : null,
       status: 'pending',
     })),
     createdAt: Date.now(),
@@ -7386,7 +7872,8 @@ async function executePlanAction(chatId, body, statusUpdater) {
   const planDisplay = plan.subtasks.map(st => {
     const roleInfo = getAgentRoleInfo(chatId, st.role);
     const depsStr = st.deps.length > 0 ? ` (после: ${st.deps.join(',')})` : '';
-    return `  ${st.id}. ${roleInfo.icon} ${st.role}: ${st.task.slice(0, 80)}${depsStr}`;
+    const schedStr = st.schedule ? ` ⏰${st.schedule}` : '';
+    return `  ${st.id}. ${roleInfo.icon} ${st.role}: ${st.task.slice(0, 80)}${depsStr}${schedStr}`;
   }).join('\n');
 
   if (statusUpdater) statusUpdater(`📋 План: ${plan.subtasks.length} подзадач`);
@@ -7583,7 +8070,7 @@ async function executeImageAction(chatId, body) {
         await sendPhoto(chatId, img.path, prompt.slice(0, 200));
         // Save generated image to sessionFrames for chaining (e.g. "draw → animate")
         try {
-          const newData = fs.readFileSync(img.path).toString('base64');
+          const newData = (await fs.promises.readFile(img.path)).toString('base64');
           if (!sessionFrames.has(chatId)) sessionFrames.set(chatId, { lastPhotos: [], lastPhotosPaths: [] });
           const frames = sessionFrames.get(chatId);
           frames.lastPhoto = newData;
@@ -7593,7 +8080,7 @@ async function executeImageAction(chatId, body) {
           frames.lastPhotos.push(newData);
           if (frames.lastPhotos.length > 10) frames.lastPhotos.shift();
         } catch (e) { /* ignore */ }
-        try { fs.unlinkSync(img.path); } catch (e) { }
+        try { await fs.promises.unlink(img.path); } catch (e) { }
       }
       const textResult = texts.map(t => t.text).join('\n').slice(0, 500);
       const fallbackNote2 = modelKey !== primaryModel ? ` (через ${IMAGE_MODELS[modelKey]?.label || modelKey})` : '';
@@ -7658,7 +8145,7 @@ async function executeImageEditAction(chatId, body) {
       for (const img of images) {
         await sendPhoto(chatId, img.path, `✏️ ${instruction.slice(0, 180)}`);
         try {
-          const editedData = fs.readFileSync(img.path).toString('base64');
+          const editedData = (await fs.promises.readFile(img.path)).toString('base64');
           if (!sessionFrames.has(chatId)) sessionFrames.set(chatId, { lastPhotos: [], lastPhotosPaths: [] });
           const frames = sessionFrames.get(chatId);
           frames.lastPhoto = editedData;
@@ -7669,7 +8156,7 @@ async function executeImageEditAction(chatId, body) {
           if (frames.lastPhotos.length > 10) frames.lastPhotos.shift();
           frames.editedPhoto = true;
         } catch (e) { /* ignore */ }
-        try { fs.unlinkSync(img.path); } catch (e) { /* ignore */ }
+        try { await fs.promises.unlink(img.path); } catch (e) { /* ignore */ }
       }
 
       return { success: true, output: photos.length > 1
@@ -8013,9 +8500,9 @@ Format: server: ${figmaServer.id}\\ntool: <tool_name>\\nargs: <JSON>`;
                     const imgPath = `/tmp/figma_design_${Date.now()}.png`;
                     const dlRes = await fetch(imgUrl, { signal: AbortSignal.timeout(30000) });
                     const buf = Buffer.from(await dlRes.arrayBuffer());
-                    fs.writeFileSync(imgPath, buf);
+                    await fs.promises.writeFile(imgPath, buf);
                     await sendPhoto(chatId, imgPath, `🎨 ${tmpl.label}: ${brief.slice(0, 100)}`);
-                    try { fs.unlinkSync(imgPath); } catch (e) { /* ignore */ }
+                    try { await fs.promises.unlink(imgPath); } catch (e) { /* ignore */ }
                   }
                 }
               }
@@ -8096,9 +8583,9 @@ async function executeFigmaAction(chatId, body) {
             const imgPath = `/tmp/figma_${Date.now()}_${nodeId.replace(/:/g, '_')}.png`;
             const imgRes = await fetch(url, { signal: AbortSignal.timeout(30000) });
             const buf = Buffer.from(await imgRes.arrayBuffer());
-            fs.writeFileSync(imgPath, buf);
+            await fs.promises.writeFile(imgPath, buf);
             await sendPhoto(chatId, imgPath, `Figma: ${nodeId}`);
-            try { fs.unlinkSync(imgPath); } catch (e) { }
+            try { await fs.promises.unlink(imgPath); } catch (e) { }
             sent++;
           }
         }
@@ -8176,7 +8663,7 @@ async function executeDelegateAction(chatId, body, statusUpdater) {
   const roleStr = roleMatch ? roleMatch[1].trim().toLowerCase() : 'executor';
   const task = taskMatch ? taskMatch[1].trim() : body.split('\n').slice(roleMatch ? 1 : 0).join('\n').trim();
   const context = contextMatch ? contextMatch[1].trim() : '';
-  const maxSteps = stepsMatch ? Math.min(parseInt(stepsMatch[1]), 15) : 7;
+  const maxSteps = stepsMatch ? Math.min(parseInt(stepsMatch[1]), 30) : 12;
   const isParallel = !!parallelMatch;
 
   if (!task) return { success: false, output: 'delegate: требуется поле "task:"' };
@@ -8260,7 +8747,7 @@ async function executeDelegateAction(chatId, body, statusUpdater) {
 
 // === OpenClaw-like Web Tools ===
 
-async function executeWebFetchAction(body) {
+async function executeWebFetchAction(body, chatId = null) {
   const lines = body.split('\n').map(l => l.trim()).filter(Boolean);
   let url = lines[0];
   for (const line of lines) {
@@ -8270,6 +8757,13 @@ async function executeWebFetchAction(body) {
   if (!url || (!url.startsWith('http://') && !url.startsWith('https://'))) {
     return { success: false, output: 'web_fetch: требуется валидный URL (http/https)' };
   }
+  // SSRF protection
+  try {
+    const urlObj = new URL(url);
+    if (isPrivateHost(urlObj.hostname)) {
+      return { success: false, output: 'web_fetch: запросы к локальным/приватным адресам запрещены' };
+    }
+  } catch (e) { return { success: false, output: `web_fetch: невалидный URL: ${e.message}` }; }
   try {
     const res = await fetch(url, {
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; sCORP-Bot/1.0)', 'Accept': 'text/html,application/json,text/plain,*/*' },
@@ -8340,6 +8834,377 @@ async function executeHttpRequestAction(chatId, body) {
     return { success: res.ok, output: truncateOutput(`[${method} ${url}] ${statusInfo}\n${output}`) };
   } catch (e) {
     return { success: false, output: `http_request ошибка: ${e.message?.slice(0, 300)}` };
+  }
+}
+
+// === Browser Automation ===
+
+/**
+ * Выбрать браузерный движок для chatId.
+ * Порядок приоритета: params.engine > userConfig.browserEngine > 'puppeteer'
+ * Возможные значения: 'puppeteer' (запуск нового Chrome) | 'chrome_mcp' (Claude CLI + Chrome Control MCP)
+ */
+function getBrowserEngine(chatId, params) {
+  const engineParam = params.engine || params.browser_engine;
+  if (engineParam === 'chrome_mcp' || engineParam === 'cdp' || engineParam === 'chrome') {
+    return 'chrome_mcp';
+  }
+  const uc = chatId ? getUserConfig(chatId) : {};
+  if (uc.browserEngine === 'chrome_mcp') return 'chrome_mcp';
+  return 'puppeteer';
+}
+
+/**
+ * Получить правильный менеджер и page для выбранного движка
+ */
+async function getBrowserPage(chatId, engine) {
+  if (engine === 'chrome_mcp') {
+    return { page: await chromeMcpBrowser.getPage(chatId), manager: chromeMcpBrowser, engine: 'chrome_mcp' };
+  }
+  return { page: await browserManager.getPage(chatId), manager: browserManager, engine: 'puppeteer' };
+}
+
+async function executeBrowseAction(chatId, body) {
+  if (!isAdmin(chatId)) {
+    return { success: false, output: 'browse: доступ только для администраторов' };
+  }
+
+  const lines = body.split('\n').map(l => l.trim()).filter(Boolean);
+  const params = {};
+  for (const line of lines) {
+    const kv = line.match(/^(\w+):\s*([\s\S]+)/);
+    if (kv) params[kv[1].toLowerCase()] = kv[2].trim();
+  }
+
+  const action = params.action || lines[0]?.split(/\s+/)[0]?.toLowerCase();
+  if (!action) {
+    return { success: false, output: 'browse: требуется действие (goto, click, type, screenshot, evaluate, extract, etc.)' };
+  }
+
+  // Определяем движок: puppeteer (по умолчанию) или chrome_mcp (Claude CLI + Chrome Control MCP)
+  const engine = getBrowserEngine(chatId, params);
+  const engineLabel = engine === 'chrome_mcp' ? '🔌 Chrome MCP' : '🤖 Puppeteer';
+
+  const BROWSE_TIMEOUT = 120_000;
+
+  // chrome_mcp: делегируем все команды (кроме meta) в Claude CLI с Chrome Control MCP
+  const META_COMMANDS = ['engine', 'engines', 'status'];
+  if (engine === 'chrome_mcp' && !META_COMMANDS.includes(action)) {
+    const result = await chromeMcpBrowser.execute(chatId, action, params);
+    return { success: result.success, output: `[${engineLabel}] ${result.output}` };
+  }
+
+  try {
+    switch (action) {
+      // --- Специальные команды для chrome_mcp ---
+      case 'engine': {
+        // Переключение движка: [ACTION: browse] action: engine\nset: chrome_mcp
+        const setEngine = params.set || params.value || 'puppeteer';
+        if (!['puppeteer', 'chrome_mcp', 'cdp', 'chrome'].includes(setEngine)) {
+          return { success: false, output: `browse engine: неизвестный движок "${setEngine}". Доступны: puppeteer, chrome_mcp` };
+        }
+        const normalizedEngine = (setEngine === 'cdp' || setEngine === 'chrome') ? 'chrome_mcp' : setEngine;
+        const uc = getUserConfig(chatId);
+        uc.browserEngine = normalizedEngine;
+        saveUserConfigs();
+        return { success: true, output: `Браузерный движок переключён на: ${normalizedEngine}\n${normalizedEngine === 'chrome_mcp' ? '🔌 Chrome MCP — управление реальным Chrome через Claude CLI + AppleScript. Не требует --remote-debugging-port.' : '🤖 Автоматический запуск нового Chrome через Puppeteer'}` };
+      }
+
+      case 'engines': {
+        // Показать доступные движки и их статус
+        const puppeteerStatus = '✅ всегда доступен';
+        let chromeMcpStatus;
+        try {
+          const available = await chromeMcpBrowser.isAvailable();
+          if (available) {
+            const info = await chromeMcpBrowser.getInfo();
+            chromeMcpStatus = `✅ подключён (${info.Browser || 'Chrome'})`;
+          } else {
+            chromeMcpStatus = '❌ Chrome не запущен или недоступен';
+          }
+        } catch (e) {
+          chromeMcpStatus = `❌ ${e.message?.slice(0, 100)}`;
+        }
+        const currentEngine = getBrowserEngine(chatId, {});
+        return {
+          success: true,
+          output: `Браузерные движки:\n\n1. puppeteer — запуск нового Chrome ${puppeteerStatus}\n2. chrome_mcp — управление реальным Chrome через Claude CLI + MCP ${chromeMcpStatus}\n\nТекущий движок: ${currentEngine}\nПереключить: engine: chrome_mcp (или puppeteer)\nИли добавить engine: chrome_mcp к любой browse-команде`
+        };
+      }
+
+      case 'goto': {
+        const url = params.url || lines[0]?.replace(/^goto\s+/i, '').trim();
+        if (!url || (!url.startsWith('http://') && !url.startsWith('https://'))) {
+          return { success: false, output: 'browse goto: требуется валидный URL (http/https)' };
+        }
+        try {
+          const urlObj = new URL(url);
+          if (isPrivateHost(urlObj.hostname)) {
+            return { success: false, output: 'browse: навигация к приватным адресам запрещена' };
+          }
+        } catch (e) {
+          return { success: false, output: `browse: невалидный URL: ${e.message}` };
+        }
+
+        const { page, manager } = await getBrowserPage(chatId, engine);
+        const resp = await page.goto(url, { waitUntil: 'networkidle2', timeout: BROWSE_TIMEOUT });
+        const title = await page.title();
+        const status = resp?.status() || 'unknown';
+
+        const session = manager.sessions.get(chatId);
+        if (session) session.history.push({ action: 'goto', url, title, ts: Date.now() });
+
+        const screenshotPath = `/tmp/browse_${chatId}_${Date.now()}.png`;
+        await page.screenshot({ path: screenshotPath, fullPage: false });
+        try { await sendPhoto(chatId, screenshotPath, `🌐 ${title}`); } catch (e) {}
+        try { fs.unlinkSync(screenshotPath); } catch (e) {}
+
+        return { success: true, output: `[${engineLabel}] Navigated to: ${url}\nTitle: ${title}\nStatus: ${status}\nScreenshot sent to chat.` };
+      }
+
+      case 'click': {
+        const selector = params.selector || params.text || lines[0]?.replace(/^click\s+/i, '').trim();
+        if (!selector) return { success: false, output: 'browse click: требуется selector или text' };
+
+        const { page } = await getBrowserPage(chatId, engine);
+        let clicked = false;
+        try {
+          await page.click(selector, { timeout: 10000 });
+          clicked = true;
+        } catch (_) {
+          const elements = await page.$$('a, button, [role="button"], input[type="submit"], [onclick]');
+          for (const el of elements) {
+            const text = await el.evaluate(e => e.textContent?.trim());
+            if (text && text.toLowerCase().includes(selector.toLowerCase())) {
+              await el.click();
+              clicked = true;
+              break;
+            }
+          }
+        }
+        if (!clicked) return { success: false, output: `browse click: элемент не найден: ${selector}` };
+
+        await new Promise(r => setTimeout(r, 500));
+        const title = await page.title();
+        return { success: true, output: `Clicked: ${selector}\nPage title: ${title}` };
+      }
+
+      case 'type': {
+        const selector = params.selector;
+        const value = params.value || params.text;
+        if (!selector || !value) {
+          return { success: false, output: 'browse type: требуются поля selector: и value:' };
+        }
+        const { page } = await getBrowserPage(chatId, engine);
+        await page.click(selector, { timeout: 10000 });
+        // Очистить поле перед вводом
+        await page.evaluate((sel) => {
+          const el = document.querySelector(sel);
+          if (el) el.value = '';
+        }, selector);
+        await page.type(selector, value, { delay: 20 });
+        return { success: true, output: `Typed "${value.slice(0, 50)}${value.length > 50 ? '...' : ''}" into ${selector}` };
+      }
+
+      case 'select': {
+        const selector = params.selector;
+        const value = params.value;
+        if (!selector || !value) {
+          return { success: false, output: 'browse select: требуются поля selector: и value:' };
+        }
+        const { page } = await getBrowserPage(chatId, engine);
+        await page.select(selector, value);
+        return { success: true, output: `Selected "${value}" in ${selector}` };
+      }
+
+      case 'screenshot': {
+        const { page } = await getBrowserPage(chatId, engine);
+        const fullPage = params.full === 'true' || params.fullpage === 'true';
+        const screenshotPath = `/tmp/browse_${chatId}_${Date.now()}.png`;
+        await page.screenshot({ path: screenshotPath, fullPage });
+        const title = await page.title();
+        try { await sendPhoto(chatId, screenshotPath, `📸 ${title}`); } catch (e) {}
+        try { fs.unlinkSync(screenshotPath); } catch (e) {}
+        return { success: true, output: `Screenshot sent. Page: ${title}` };
+      }
+
+      case 'evaluate':
+      case 'eval': {
+        const script = params.script || params.code || lines.slice(1).join('\n').trim()
+          || lines[0]?.replace(/^eval(uate)?\s+/i, '').trim();
+        if (!script) return { success: false, output: 'browse evaluate: требуется JavaScript код' };
+        const { page } = await getBrowserPage(chatId, engine);
+        const result = await page.evaluate((code) => {
+          try { return eval(code); } catch (e) { return `Error: ${e.message}`; }
+        }, script);
+        const output = typeof result === 'object' ? JSON.stringify(result, null, 2) : String(result ?? 'undefined');
+        return { success: true, output: truncateOutput(`[eval result]\n${output}`) };
+      }
+
+      case 'wait': {
+        const target = params.selector || params.time || params.seconds
+          || lines[0]?.replace(/^wait\s+/i, '').trim();
+        if (!target) return { success: false, output: 'browse wait: требуется selector или число секунд' };
+        const { page } = await getBrowserPage(chatId, engine);
+        if (/^\d+$/.test(target)) {
+          const ms = Math.min(parseInt(target), 30) * 1000;
+          await new Promise(r => setTimeout(r, ms));
+          return { success: true, output: `Waited ${parseInt(target)} seconds` };
+        } else {
+          await page.waitForSelector(target, { timeout: BROWSE_TIMEOUT });
+          return { success: true, output: `Element appeared: ${target}` };
+        }
+      }
+
+      case 'scroll': {
+        const direction = params.direction || 'down';
+        const amount = parseInt(params.amount || params.pixels || '500');
+        const { page } = await getBrowserPage(chatId, engine);
+        const deltaY = direction === 'up' ? -amount : amount;
+        await page.evaluate((dy) => window.scrollBy(0, dy), deltaY);
+        return { success: true, output: `Scrolled ${direction} by ${Math.abs(amount)}px` };
+      }
+
+      case 'extract': {
+        const selector = params.selector || lines[0]?.replace(/^extract\s+/i, '').trim();
+        if (!selector) return { success: false, output: 'browse extract: требуется CSS selector' };
+        const { page } = await getBrowserPage(chatId, engine);
+        const data = await page.$$eval(selector, els =>
+          els.slice(0, 50).map(el => ({
+            tag: el.tagName.toLowerCase(),
+            text: el.textContent?.trim().slice(0, 200),
+            href: el.href || undefined,
+            src: el.src || undefined,
+          }))
+        );
+        return { success: true, output: truncateOutput(`[extract "${selector}"] ${data.length} elements\n${JSON.stringify(data, null, 2)}`) };
+      }
+
+      case 'cookies_set': {
+        const domain = params.domain;
+        const name = params.name;
+        const value = params.value;
+        if (!domain || !name || !value) {
+          return { success: false, output: 'browse cookies_set: требуются domain, name, value' };
+        }
+        const { page } = await getBrowserPage(chatId, engine);
+        await page.setCookie({
+          name, value, domain, path: '/',
+          secure: params.secure === 'true' || domain.includes('google'),
+        });
+        return { success: true, output: `Cookie set: ${name} on ${domain}` };
+      }
+
+      case 'cookies_get': {
+        const { page } = await getBrowserPage(chatId, engine);
+        const cookies = await page.cookies();
+        const summary = cookies.slice(0, 30).map(c => `${c.name}=${c.value.slice(0, 20)}... (${c.domain})`);
+        return { success: true, output: truncateOutput(`${cookies.length} cookies:\n${summary.join('\n')}`) };
+      }
+
+      case 'cookies_save': {
+        const manager = engine === 'chrome_mcp' ? chromeMcpBrowser : browserManager;
+        await manager.saveCookies(chatId);
+        return { success: true, output: `[${engineLabel}] Cookies saved to disk.` };
+      }
+
+      case 'tabs':
+      case 'tab_list': {
+        const manager = engine === 'chrome_mcp' ? chromeMcpBrowser : browserManager;
+        const session = manager.sessions.get(chatId);
+        if (!session) return { success: false, output: 'No browser session' };
+        const pages = await session.browser.pages();
+        const tabs = [];
+        for (let i = 0; i < pages.length; i++) {
+          const title = await pages[i].title().catch(() => '(untitled)');
+          tabs.push(`${i}: ${title} — ${pages[i].url()}`);
+        }
+        return { success: true, output: `${pages.length} tabs:\n${tabs.join('\n')}` };
+      }
+
+      case 'tab_switch': {
+        const index = parseInt(params.index || params.tab || '0');
+        const manager = engine === 'chrome_mcp' ? chromeMcpBrowser : browserManager;
+        const session = manager.sessions.get(chatId);
+        if (!session) return { success: false, output: 'No browser session' };
+        const pages = await session.browser.pages();
+        if (index < 0 || index >= pages.length) return { success: false, output: `Tab ${index} not found (${pages.length} tabs)` };
+        session.page = pages[index];
+        await pages[index].bringToFront();
+        return { success: true, output: `Switched to tab ${index}: ${await pages[index].title()}` };
+      }
+
+      case 'tab_new': {
+        const manager = engine === 'chrome_mcp' ? chromeMcpBrowser : browserManager;
+        const session = await manager.getOrCreate(chatId);
+        const newPage = await session.browser.newPage();
+        await newPage.setViewport({ width: 1920, height: 1080 });
+        session.page = newPage;
+        if (params.url) {
+          await newPage.goto(params.url, { waitUntil: 'networkidle2', timeout: BROWSE_TIMEOUT });
+        }
+        return { success: true, output: `New tab opened${params.url ? ': ' + params.url : ''}` };
+      }
+
+      case 'fill_form': {
+        // Пакетное заполнение формы: field1: value1\nfield2: value2
+        const { page } = await getBrowserPage(chatId, engine);
+        const fields = Object.entries(params).filter(([k]) => !['action'].includes(k));
+        let filled = 0;
+        for (const [selector, value] of fields) {
+          try {
+            await page.click(selector, { timeout: 5000 });
+            await page.evaluate((sel) => { const el = document.querySelector(sel); if (el) el.value = ''; }, selector);
+            await page.type(selector, value, { delay: 30 });
+            filled++;
+          } catch (e) {
+            // Пробуем по name/id
+            try {
+              const sel = `[name="${selector}"], #${selector}`;
+              await page.click(sel, { timeout: 5000 });
+              await page.evaluate((s) => { const el = document.querySelector(s); if (el) el.value = ''; }, sel);
+              await page.type(sel, value, { delay: 30 });
+              filled++;
+            } catch (e2) {}
+          }
+        }
+        return { success: filled > 0, output: `Filled ${filled}/${fields.length} form fields` };
+      }
+
+      case 'close': {
+        const manager = engine === 'chrome_mcp' ? chromeMcpBrowser : browserManager;
+        await manager.close(chatId);
+        return { success: true, output: `[${engineLabel}] Browser session closed. Cookies saved.` };
+      }
+
+      case 'status': {
+        // Показываем сессии из ОБОИХ движков
+        const puppeteerSessions = browserManager.listSessions().map(s => ({ ...s, engine: 'puppeteer' }));
+        const mcpSessions = chromeMcpBrowser.listSessions();
+        const allSessions = [...puppeteerSessions, ...mcpSessions];
+        if (allSessions.length === 0) return { success: true, output: 'No active browser sessions.' };
+        const info = allSessions.map(s =>
+          `[${s.engine === 'chrome_mcp' ? '🔌MCP' : '🤖Ppt'}] Chat ${s.chatId}: ${s.connected ? 'ALIVE' : 'DEAD'}, age=${s.age}s, idle=${s.idle}s, history=${s.historyLength}${s.ownedTabs ? `, tabs=${s.ownedTabs}` : ''}`
+        );
+        return { success: true, output: info.join('\n') };
+      }
+
+      default:
+        return { success: false, output: `browse: неизвестная команда "${action}". Доступны: goto, click, type, select, screenshot, evaluate, wait, scroll, extract, fill_form, cookies_set, cookies_get, cookies_save, tabs, tab_switch, tab_new, close, status, engine, engines` };
+    }
+  } catch (e) {
+    const msg = e.message?.slice(0, 500) || String(e);
+    // При ошибке навигации или таймауте — пробуем скриншот для контекста
+    if (action === 'goto' || action === 'click') {
+      try {
+        const { page } = await getBrowserPage(chatId, engine);
+        const errScreenPath = `/tmp/browse_err_${chatId}_${Date.now()}.png`;
+        await page.screenshot({ path: errScreenPath, fullPage: false });
+        await sendPhoto(chatId, errScreenPath, `⚠️ [${engineLabel}] Error: ${msg.slice(0, 100)}`);
+        try { fs.unlinkSync(errScreenPath); } catch (_) {}
+      } catch (_) {}
+    }
+    return { success: false, output: `[${engineLabel}] browse error: ${msg}` };
   }
 }
 
@@ -8448,8 +9313,50 @@ async function executeAutoplan(chatId, statusUpdater) {
       return { success: false, output: `execute_plan: циклическая зависимость или невыполнимые задачи. Pending: ${[...pending].join(',')}` };
     }
 
+    // Разделяем на немедленные и отложенные задачи
+    const immediate = ready.filter(st => !st.schedule);
+    const deferred = ready.filter(st => st.schedule);
+
+    // Отложенные → создаём scheduledAction с agent типом
+    for (const st of deferred) {
+      const delayMs = parseTimeString(st.schedule);
+      if (delayMs && delayMs >= 60000) {
+        const depsContext = st.deps.map(d => {
+          const depResult = results.get(d);
+          const depTask = subtasks.find(s => s.id === d);
+          return depResult ? `Результат #${d} (${depTask?.role}): ${depResult.output.slice(0, 500)}` : '';
+        }).filter(Boolean).join('\n');
+
+        const id = nextScheduleId++;
+        const fireAt = Date.now() + delayMs;
+        if (!config.scheduledActions) config.scheduledActions = [];
+        config.scheduledActions.push({
+          id, chatId, actionName: 'agent',
+          actionBody: `[DEFERRED PLAN SUBTASK]\nЦель плана: ${plan.goal}\nПодзадача: ${st.task}\nРоль: ${st.role}\n${depsContext ? `Контекст зависимостей:\n${depsContext}` : ''}`,
+          description: `План: ${st.task.slice(0, 60)}`,
+          context: `Deferred from plan "${plan.goal}"`,
+          fireAt
+        });
+        saveConfig();
+        const timerId = setTimeout(() => fireScheduledAction(id), delayMs);
+        scheduledTimers.set(id, timerId);
+
+        // Помечаем как deferred с плейсхолдер-результатом
+        st.status = 'deferred';
+        results.set(st.id, { success: true, output: `⏰ Отложено на ${st.schedule} (scheduled #${id})`, actions: [] });
+        pending.delete(st.id);
+        totalDone++;
+        if (tracker) tracker.log.push({ ts: Date.now(), text: `⏰ #${st.id} ${st.role}: отложено на ${st.schedule}` });
+      } else {
+        // Невалидный schedule — выполнить сразу
+        immediate.push(st);
+      }
+    }
+
+    if (immediate.length === 0) continue;
+
     // Выполняем через пул конкурентности (лимит параллельных AI-вызовов)
-    const batchTasks = ready.map(st => ({
+    const batchTasks = immediate.map(st => ({
       id: `plan-${chatId}-${st.id}`,
       meta: { role: st.role, priority: st.priority, chatId },
       fn: async () => {
@@ -8469,7 +9376,7 @@ async function executeAutoplan(chatId, statusUpdater) {
         const agentDef = effectiveAgentsMap[st.role];
         const baseSteps = agentDef?.maxSteps || 5;
         const priorityMultiplier = st.priority === 'high' ? 1.5 : st.priority === 'low' ? 0.6 : 1;
-        const maxSteps = Math.max(2, Math.min(10, Math.round(baseSteps * priorityMultiplier)));
+        const maxSteps = Math.max(3, Math.min(25, Math.round(baseSteps * priorityMultiplier)));
 
         try {
           progress.update(st.id, { pct: 30, phase: 'executing', role: st.role });
@@ -8517,20 +9424,49 @@ async function executeAutoplan(chatId, statusUpdater) {
     }
   }
 
+  // Quality Gate: автоматическая проверка качества при ≥2 успешных подзадачах
+  let qaVerdict = '';
+  const successResults = [...results.entries()].filter(([, r]) => r.success);
+  if (successResults.length >= 2) {
+    try {
+      const summary = successResults.map(([id, r]) => {
+        const st = subtasks.find(s => s.id === id);
+        return `#${id} (${st?.role}): ${(r.output || '').slice(0, 300)}`;
+      }).join('\n---\n');
+      const qaPrompt = `Ты QA-инспектор. Оцени результаты выполнения плана "${plan.goal}".
+
+Результаты подзадач:
+${summary.slice(0, 3000)}
+
+Проверь:
+1. Все ли подзадачи согласованы между собой?
+2. Есть ли противоречия в результатах?
+3. Покрывают ли результаты цель плана?
+
+Ответь кратко (до 300 символов): QA PASS + резюме или QA FLAG + что не так.`;
+      const qaResult = await callAI('gemini-2.5-flash', [{ role: 'user', content: qaPrompt }], 'Strict QA inspector', false, chatId);
+      qaVerdict = qaResult.includes('QA FLAG') ? `\n\n⚠️ QA FLAG: ${qaResult.slice(0, 400)}` : `\n\n✅ QA PASS: ${qaResult.slice(0, 200)}`;
+    } catch (e) {
+      qaVerdict = `\n\n⚠️ QA: не удалось проверить (${e.message})`;
+    }
+  }
+
   // Формируем итоговый отчёт
   const report = subtasks.map(st => {
     const r = results.get(st.id);
-    const icon = r?.success ? '✅' : '❌';
+    const icon = st.status === 'deferred' ? '⏰' : r?.success ? '✅' : '❌';
     const actionsInfo = r?.actions?.length ? ` [${r.actions.map(a => `${a.success ? '✓' : '✗'}${a.name}`).join(', ')}]` : '';
     return `${icon} #${st.id} ${st.role}: ${st.task.slice(0, 60)}${actionsInfo}\n   ${(r?.output || 'нет результата').slice(0, 300)}`;
   }).join('\n\n');
 
   const successCount = [...results.values()].filter(r => r.success).length;
+  const deferredCount = subtasks.filter(st => st.status === 'deferred').length;
   const domainLabel = taskDomain ? ` | ${BUSINESS_DOMAINS[taskDomain]?.label}` : '';
+  const deferredLabel = deferredCount > 0 ? ` | ⏰ отложено: ${deferredCount}` : '';
 
   return {
     success: successCount > 0,
-    output: `[AUTOPLAN: ${successCount}/${subtasks.length} успешно${domainLabel}]\n🎯 ${plan.goal}\n\n${report}\n[/AUTOPLAN]`,
+    output: `[AUTOPLAN: ${successCount}/${subtasks.length} успешно${deferredLabel}${domainLabel}]\n🎯 ${plan.goal}\n\n${report}${qaVerdict}\n[/AUTOPLAN]`,
   };
 }
 
@@ -8563,12 +9499,14 @@ async function _executeActionInner(chatId, action, statusUpdater) {
     case 'remind': return executeRemindAction(chatId, action.body);
     case 'schedule': return executeScheduleAction(chatId, action.body);
     case 'todo': return executeTodoAction(chatId, action.body);
+    case 'todo_manage': return executeTodoManageAction(chatId, action.body);
+    case 'quality_check': return await executeQualityCheckAction(chatId, action.body);
     case 'search': return await executeSearchAction(action.body, chatId);
-    case 'file': return executeFileAction(chatId, action.body);
-    case 'read_file': return executeReadFileAction(chatId, action.body);
-    case 'write_file': return executeWriteFileAction(chatId, action.body);
-    case 'edit_file': return executeEditFileAction(chatId, action.body);
-    case 'web_fetch': return await executeWebFetchAction(action.body);
+    case 'file': return await executeFileAction(chatId, action.body);
+    case 'read_file': return await executeReadFileAction(chatId, action.body);
+    case 'write_file': return await executeWriteFileAction(chatId, action.body);
+    case 'edit_file': return await executeEditFileAction(chatId, action.body);
+    case 'web_fetch': return await executeWebFetchAction(action.body, chatId);
     case 'http_request': return await executeHttpRequestAction(chatId, action.body);
     case 'skill': return await executeSkillAction(chatId, action.body);
     case 'plan': return await executePlanAction(chatId, action.body, statusUpdater);
@@ -8588,6 +9526,7 @@ async function _executeActionInner(chatId, action, statusUpdater) {
     case 'memory': return executeMemoryAction(chatId, action.body);
     case 'delegate': return await executeDelegateAction(chatId, action.body, statusUpdater);
     case 'autonomous': return await executeAutonomousAction(chatId, action.body, statusUpdater);
+    case 'browse': return await executeBrowseAction(chatId, action.body);
     default: {
       // === Plugin SDK: попытка выполнить action через плагин ===
       if (global.pluginManager?.hasAction(action.name)) {
@@ -8855,7 +9794,7 @@ async function runBackground(chatId, prompt, desc, extraOpts = {}) {
         : '';
       const bgMcpPrompt = getMcpToolsForPrompt(chatId);
       const fullSystemPrompt = [basePrompt, bgZepPrompt, uc.language, uc.systemPrompt, modePrompt, skillsPrompt, bgMcpPrompt, framesCtxBg].filter(Boolean).join('\n\n');
-      const maxSteps = Math.min(uc.agentMaxSteps || 15, 10);
+      const maxSteps = uc.agentMaxSteps || 20;
       taskInfo.maxSteps = maxSteps;
 
       // === Параллельная фоновая делегация (если указаны роли) ===
@@ -9064,8 +10003,14 @@ async function validateResponseWithAgent(userQuery, aiResponse, chatId) {
 }
 
 async function runClaude(chatId, text) {
-  const releaseLock = await acquireChatLock(chatId);
-  try { return await _runClaudeInner(chatId, text); } finally { releaseLock(); }
+  // Параллельное выполнение: без chatLock, задачи запускаются одновременно
+  // Typing indicator: непрерывный "печатает..." пока идёт обработка
+  const typingInterval = setInterval(() => {
+    tgApi('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {});
+  }, 4000);
+  // Первый typing сразу
+  tgApi('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {});
+  try { return await _runClaudeInner(chatId, text); } finally { clearInterval(typingInterval); }
 }
 async function _runClaudeInner(chatId, text) {
   const uc = getUserConfig(chatId);
@@ -9155,7 +10100,8 @@ async function _runClaudeInner(chatId, text) {
   const fgTasks = getActiveFgTasks(chatId);
 
   // Сразу ставим пометку о новой задаче, до любых await
-  fgTasks.set(taskId, { timer: null, msgId: null, startTime: Date.now(), _startTime: Date.now(), _claudeSlot: claudeSlot, taskId });
+  const abortController = new AbortController();
+  fgTasks.set(taskId, { timer: null, msgId: null, startTime: Date.now(), _startTime: Date.now(), _claudeSlot: claudeSlot, taskId, abort: abortController, description: (prompt || '').slice(0, 80) || 'Задача' });
 
   const cancellationToken = { isCancelled: false };
   cancellableOperations.set(chatId, cancellationToken);
@@ -9172,7 +10118,7 @@ async function _runClaudeInner(chatId, text) {
   const startTime = Date.now();
   let statusMsgId = null;
   let step = 0;
-  const maxSteps = Math.min(uc.agentMaxSteps || 15, estimated.maxSteps);
+  const maxSteps = uc.agentMaxSteps || estimated.maxSteps;
 
   try {
     // Zep: restore history async (don't block)
@@ -9373,8 +10319,9 @@ async function _runClaudeInner(chatId, text) {
     let finalText = '';
     let lastActionResult = null; // трекаем последний результат действия
     const actionRetries = new Map();
-    const MAX_RETRIES_PER_ACTION = 2;
-    const MAX_TOTAL_RETRIES = 4;
+    const MAX_RETRIES_PER_ACTION = 3;
+    const MAX_TOTAL_RETRIES = 8;
+    const failureLog = []; // трекинг ошибок для детекции зацикливания
     let totalRetries = 0;
 
     while (step < maxSteps) {
@@ -9386,7 +10333,8 @@ async function _runClaudeInner(chatId, text) {
         finalText = 'Остановлено пользователем.';
         break;
       }
-      step++;
+      // step++ перенесён ПОСЛЕ успешного действия — ретраи НЕ сжирают бюджет
+      const displayStep = step + 1; // для отображения (1-based)
 
       // Контекстные фазы вместо generic "Шаг X/Y"
       const stepPhases = [
@@ -9404,15 +10352,15 @@ async function _runClaudeInner(chatId, text) {
         '🎯 Финализирую...'
       ];
       let phaseIdx;
-      if (step === 1) phaseIdx = 0;
-      else if (step === maxSteps) phaseIdx = stepPhases.length - 1;
-      else if (step <= stepPhases.length) phaseIdx = step - 1;
+      if (displayStep === 1) phaseIdx = 0;
+      else if (displayStep === maxSteps) phaseIdx = stepPhases.length - 1;
+      else if (displayStep <= stepPhases.length) phaseIdx = displayStep - 1;
       else {
         const cyclePhases = stepPhases.slice(2, -2);
-        phaseIdx = 2 + ((step - stepPhases.length) % cyclePhases.length);
+        phaseIdx = 2 + ((displayStep - stepPhases.length) % cyclePhases.length);
       }
-      const smartPhase = stepPhases[phaseIdx] || `🔄 Шаг ${step}/${maxSteps}`;
-      updateStatus({ step, phase: smartPhase, thought: null, actionName: null, actionDetail: null });
+      const smartPhase = stepPhases[phaseIdx] || `🔄 Шаг ${displayStep}/${maxSteps}`;
+      updateStatus({ step: displayStep, phase: smartPhase, thought: null, actionName: null, actionDetail: null });
 
       let result;
 
@@ -9501,9 +10449,23 @@ async function _runClaudeInner(chatId, text) {
           const stepMessages = isResumeStep ? messages.slice(-1) : normalizeMessages(messages);
           const stepSystemPrompt = isResumeStep ? '' : fullSystemPrompt;
 
-          result = await callAIStreamWithFallback(model, stepMessages, stepSystemPrompt, onChunk, chatId, { ...fallbackOpts, onEvent, cliOpts: stepCliOpts });
+          try {
+            result = await callAIStreamWithFallback(model, stepMessages, stepSystemPrompt, onChunk, chatId, { ...fallbackOpts, onEvent, cliOpts: stepCliOpts, signal: abortController.signal });
+          } catch (err) {
+            if (err.name === 'AbortError' || abortController.signal.aborted || cancellationToken?.isCancelled) {
+              finalText = '⛔ Операция отменена пользователем.';
+              break;
+            }
+            throw err;
+          }
         }
       } // end if (!result)
+
+      // Проверка отмены после AI-вызова
+      if (abortController.signal.aborted || cancellationToken?.isCancelled) {
+        finalText = '⛔ Операция отменена пользователем.';
+        break;
+      }
 
       // Синхронизируем фактически использованную модель/провайдера
       const syncModel = result.actualModel || model;
@@ -9547,6 +10509,7 @@ async function _runClaudeInner(chatId, text) {
       const action = parseAction(responseText);
 
       if (!action) {
+        step++; // текстовый ответ — финальный шаг
         finalText = responseText;
         break;
       }
@@ -9610,6 +10573,15 @@ async function _runClaudeInner(chatId, text) {
       const actionDuration = Date.now() - actionStartMs;
       if (!actionResult.silent) lastActionResult = { name: action.name, ...actionResult };
 
+      // step++ только при успешном действии — ретраи НЕ расходуют бюджет
+      if (actionResult.success) step++;
+
+      // Проверка отмены после выполнения действия
+      if (abortController.signal.aborted || cancellationToken?.isCancelled) {
+        finalText = '⛔ Операция отменена пользователем.';
+        break;
+      }
+
       // Автоотправка файлов из результатов действий в Telegram
       if (actionResult.success && ['bash', 'write_file'].includes(action.name)) {
         autoSendMentionedFiles(chatId, actionResult.output);
@@ -9635,11 +10607,40 @@ async function _runClaudeInner(chatId, text) {
         time: Date.now()
       });
 
-      // Умная самокоррекция: per-action retry + error-type-aware guidance + self-learning
+      // === Умная самокоррекция: per-action retry + stuck detection + model escalation + strategy switching ===
       if (!actionResult.success) {
         const actionTypeRetries = actionRetries.get(action.name) || 0;
         const canRetryAction = actionTypeRetries < MAX_RETRIES_PER_ACTION;
         const canRetryTotal = totalRetries < MAX_TOTAL_RETRIES;
+
+        // --- Stuck-loop detection: если одна и та же ошибка повторяется ---
+        const errSignature = `${action.name}:${actionResult.output.slice(0, 80).replace(/\d+/g, 'N')}`;
+        failureLog.push(errSignature);
+        const sameErrorCount = failureLog.filter(e => e === errSignature).length;
+        const isStuck = sameErrorCount >= 2; // одна и та же ошибка дважды = зацикливание
+
+        if (isStuck && canRetryTotal) {
+          // Зацикливание обнаружено — принудительная смена стратегии
+          totalRetries++;
+          actionRetries.set(action.name, MAX_RETRIES_PER_ACTION); // блокируем этот тип
+          updateStatus({
+            phase: `🔄 Зацикливание! Смена стратегии...`,
+            error: `${action.name}: одна и та же ошибка ${sameErrorCount}x`
+          });
+          tracker.log.push({ ts: Date.now(), text: `🔄 STUCK: ${action.name} → смена подхода` });
+
+          const alts = ACTION_ALTERNATIVES[action.name] || ['bash', 'delegate'];
+          const stuckGuidance = `⚠️ ЗАЦИКЛИВАНИЕ ОБНАРУЖЕНО: действие "${action.name}" даёт ОДНУ И ТУ ЖЕ ошибку ${sameErrorCount} раз подряд.
+
+🚫 ЗАПРЕЩЕНО повторять "${action.name}" с похожими параметрами.
+✅ ОБЯЗАТЕЛЬНО используй ДРУГОЕ действие: ${alts.map(a => `[ACTION: ${a}]`).join(', ')}.
+
+Перестрой подход ПОЛНОСТЬЮ. Если задача — выполнить команду, используй node -e. Если задача — получить данные, делегируй. Если задача — создать файл, используй write_file или bash heredoc.`;
+
+          messages.push({ role: 'assistant', content: responseText });
+          messages.push({ role: 'user', content: `[ERROR: ${action.name}]\n${actionResult.output}\n[/ERROR]\n\n${stuckGuidance}` });
+          continue;
+        }
 
         if (canRetryAction && canRetryTotal) {
           actionRetries.set(action.name, actionTypeRetries + 1);
@@ -9650,7 +10651,16 @@ async function _runClaudeInner(chatId, text) {
           });
           tracker.log.push({ ts: Date.now(), text: `🔧 Retry ${action.name}: ${actionResult.output.slice(0, 80)}` });
 
-          const errorGuidance = getRetryGuidance(action.name, actionResult.output);
+          const errorGuidance = getRetryGuidance(action.name, actionResult.output, actionTypeRetries);
+
+          // --- Model escalation: если >4 общих ошибок, эскалируем на более сильную модель ---
+          if (totalRetries >= 4 && !model.includes('opus') && !model.includes('pro')) {
+            const escalationModels = ['gemini-2.5-pro', 'claude-sonnet', 'gpt-4.1'];
+            const escalatedModel = escalationModels.find(m => m !== model) || model;
+            tracker.log.push({ ts: Date.now(), text: `🚀 Escalation: ${model} → ${escalatedModel}` });
+            // Подменяем модель для следующего вызова через cliOpts
+            if (typeof cliOpts === 'object') cliOpts.escalatedModel = escalatedModel;
+          }
 
           messages.push({ role: 'assistant', content: responseText });
           messages.push({
@@ -9660,16 +10670,28 @@ async function _runClaudeInner(chatId, text) {
           continue;
         }
 
-        // Исчерпаны попытки для этого типа — предложить альтернативу
+        // Исчерпаны попытки для этого типа — предложить конкретные альтернативы
         if (!canRetryAction && canRetryTotal) {
           totalRetries++;
+          const alts = ACTION_ALTERNATIVES[action.name] || ['bash', 'delegate'];
           updateStatus({
-            phase: `🔄 Ищу альтернативный подход...`,
+            phase: `🔄 Смена стратегии → ${alts[0]}...`,
             error: `${action.name}: исчерпаны попытки`
           });
-          tracker.log.push({ ts: Date.now(), text: `🔄 ${action.name}: смена стратегии` });
+          tracker.log.push({ ts: Date.now(), text: `🔄 ${action.name}: смена на ${alts.join('/')}` });
 
-          const altGuidance = `Действие "${action.name}" не работает после ${MAX_RETRIES_PER_ACTION} попыток. Используй ДРУГОЙ тип действия для решения задачи.`;
+          const altGuidance = `🚫 Действие "${action.name}" НЕ РАБОТАЕТ после ${MAX_RETRIES_PER_ACTION} попыток.
+
+КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать "${action.name}" снова.
+✅ ОБЯЗАТЕЛЬНО используй ДРУГОЙ тип действия: ${alts.map(a => `[ACTION: ${a}]`).join(', ')}.
+
+Конкретные стратегии:
+${action.name === 'bash' ? '• [ACTION: delegate] role=executor — делегируй выполнение\n• node -e "..." — используй Node.js вместо bash' : ''}
+${action.name === 'delegate' ? '• [ACTION: bash] — выполни напрямую через команду\n• [ACTION: parallel] — попробуй несколько подходов одновременно' : ''}
+${action.name === 'image' ? '• Перепиши промпт РАДИКАЛЬНО, максимум 20 слов, на English\n• [ACTION: bash] node -e — создай SVG для схем/диаграмм' : ''}
+${!['bash', 'delegate', 'image'].includes(action.name) ? `• ${alts.map(a => `[ACTION: ${a}]`).join('\n• ')}` : ''}
+
+Ты ДОЛЖЕН найти способ выполнить задачу. У тебя достаточно инструментов.`;
 
           messages.push({ role: 'assistant', content: responseText });
           messages.push({
@@ -9679,9 +10701,24 @@ async function _runClaudeInner(chatId, text) {
           continue;
         }
 
+        // Все retry исчерпаны — но НЕ сдаёмся, а даём финальный шанс
+        if (totalRetries >= MAX_TOTAL_RETRIES && step < maxSteps - 1) {
+          updateStatus({ phase: '🔥 Последняя попытка...', error: 'Все retry исчерпаны' });
+          messages.push({ role: 'assistant', content: responseText });
+          messages.push({
+            role: 'user',
+            content: `[ERROR: ${action.name}]\n${actionResult.output}\n[/ERROR]\n\n🔥 ВСЕ ПОПЫТКИ ИСЧЕРПАНЫ. Это ПОСЛЕДНИЙ шанс. Дай пользователю ХОТЬ КАКОЙ-ТО результат. Если основная задача невыполнима — предложи ближайшую альтернативу или частичный результат. НЕ говори "не удалось" без конкретного объяснения и предложения.`
+          });
+          totalRetries = MAX_TOTAL_RETRIES - 1; // даём ещё 1 попытку
+          continue;
+        }
+
         updateStatus({ error: actionResult.output.slice(0, 100) });
       } else {
         updateStatus({ error: null });
+        // Успех — сбрасываем failure log для этого типа
+        const idx = failureLog.lastIndexOf(failureLog.find(e => e.startsWith(action.name + ':')));
+        if (idx >= 0) failureLog.splice(idx, 1);
       }
 
       messages.push({ role: 'assistant', content: responseText });
@@ -9765,7 +10802,7 @@ async function _runClaudeInner(chatId, text) {
     autoSendMentionedFiles(chatId, displayText);
 
     if (step >= maxSteps && parseAction(finalText)) {
-      send(chatId, `⚠️ Достигнут лимит шагов (${maxSteps}). Задача может быть не завершена.`);
+      send(chatId, `⚠️ Достигнут лимит шагов (${maxSteps}). Напишите "продолжай" чтобы я продолжил выполнение.`);
     }
 
   } catch (e) {
@@ -10202,6 +11239,18 @@ async function processUpdate(upd) {
     return;
   }
 
+  // === Quick Actions из меню ===
+  if (waitingTextPrompt.has(chatId)) {
+    waitingTextPrompt.delete(chatId);
+    runClaude(chatId, `Напиши качественный текст по запросу: ${text}`);
+    return;
+  }
+  if (waitingSearchQuery.has(chatId)) {
+    waitingSearchQuery.delete(chatId);
+    runClaude(chatId, `Найди в интернете: ${text}`);
+    return;
+  }
+
   // === Plugin SDK: обработка плагиновых команд ===
   if (text.startsWith('/') && global.pluginManager) {
     const parts = text.slice(1).split(/\s+/);
@@ -10398,6 +11447,33 @@ async function processUpdate(upd) {
   if (text === '/stop') { stopTask(chatId); sendTemp(chatId, '⛔ Остановлено'); return; }
   if (text === '/settings') { send(chatId, '⚙️ Настройки', settingsMenu(chatId)); return; }
   if (text === '/help') { send(chatId, helpText(), mainMenu(chatId)); return; }
+  if (text === '/profile') {
+    const uc = getUserConfig(chatId);
+    const history = chatHistory.get(chatId) || [];
+    const mode = uc.mode || 'обычный';
+    const model = uc.model || 'auto';
+    const imgModel = uc.imageModel || 'nano-banana';
+    const vidModel = uc.videoModel || 'veo-3.1-fast';
+    const agent = uc.agentMode ? '✅' : '❌';
+    const mem = uc.memory ? '✅' : '❌';
+    const todos = (config.todos || []).filter(t => t.chatId === chatId);
+    const rems = (config.reminders || []).filter(r => r.chatId === chatId);
+    send(chatId, `👤 *Ваш профиль*
+
+🧠 Модель: \`${model}\`
+🎭 Режим: ${mode}
+🤖 Агент: ${agent}
+💾 Память: ${mem}
+
+📊 *Статистика:*
+💬 Сообщений в истории: ${history.length}
+✅ Задач: ${todos.length}
+⏰ Напоминаний: ${rems.length}
+
+🎨 Модель изображений: \`${imgModel}\`
+🎬 Модель видео: \`${vidModel}\``, { parse_mode: 'Markdown' });
+    return;
+  }
   if (text === '/chats') {
     try {
       const users = JSON.parse(fs.readFileSync(path.join(__dirname, 'users.json'), 'utf8'));
@@ -10665,30 +11741,30 @@ async function processUpdate(upd) {
     return;
   }
   if (text === '/tasks') {
+    const fgTasks = getActiveFgTasks(chatId);
     const userBg = getUserBgTasks(chatId);
-    const fgTask = activeTasks.has(chatId);
-    if (userBg.size === 0 && !fgTask) {
+    if (userBg.size === 0 && fgTasks.size === 0) {
       send(chatId, '📋 Нет активных задач');
       return;
     }
     const fmtSec = (s) => s >= 60 ? `${Math.floor(s / 60)}м${s % 60 > 0 ? s % 60 + 'с' : ''}` : `${s}с`;
     let msg = '📋 𝗧𝗔𝗦𝗞𝗦\n━━━━━━━━━━━━━━━━━━━━\n';
-    if (fgTask) {
-      const at = activeTasks.get(chatId);
-      const st = at?.statusState;
-      if (st) {
-        const elapsed = Math.round((Date.now() - st.startTime) / 1000);
-        const pct = st.maxSteps > 0 ? Math.round((st.step / st.maxSteps) * 100) : 0;
-        const eta = st.step > 0 && st.maxSteps > st.step ? ` ETA ~${fmtSec(Math.round(elapsed / st.step * (st.maxSteps - st.step)))}` : '';
-        const successCount = (st.completedActions || []).filter(a => a.success).length;
-        const failCount = (st.completedActions || []).length - successCount;
-        msg += `🔵 𝗙𝗼𝗿𝗲𝗴𝗿𝗼𝘂𝗻𝗱\n`;
-        msg += `[${gradientBar(pct, 14)}] ${st.step}/${st.maxSteps}${eta}\n`;
-        msg += `⏱ ${fmtSec(elapsed)} │ ✅${successCount} ❌${failCount}\n`;
-        if (st.phase) msg += `${fancySpin(elapsed)} ${st.phase}\n`;
-        if (st.actionName) msg += `╰─ ${st.actionName}${st.actionDetail ? ': ' + st.actionDetail.slice(0, 30) : ''}\n`;
-      } else {
-        msg += '🔵 Foreground: выполняется\n';
+    const rows = [];
+    if (fgTasks.size > 0) {
+      msg += `🔵 𝗙𝗼𝗿𝗲𝗴𝗿𝗼𝘂𝗻𝗱 (${fgTasks.size}):\n`;
+      for (const [tid, task] of fgTasks) {
+        const st = task.statusState;
+        const elapsed = Math.round((Date.now() - (task._startTime || task.startTime || Date.now())) / 1000);
+        if (st) {
+          const pct = st.maxSteps > 0 ? Math.round((st.step / st.maxSteps) * 100) : 0;
+          const eta = st.step > 0 && st.maxSteps > st.step ? ` ETA ~${fmtSec(Math.round(elapsed / st.step * (st.maxSteps - st.step)))}` : '';
+          msg += `  [${gradientBar(pct, 14)}] ${st.step}/${st.maxSteps}${eta}\n`;
+          msg += `  ⏱ ${fmtSec(elapsed)} │ ${(task.description || st.actionName || 'задача').slice(0, 30)}\n`;
+          if (st.phase) msg += `  ${fancySpin(elapsed)} ${st.phase}\n`;
+        } else {
+          msg += `  ⏳ ${(task.description || 'задача').slice(0, 35)} • ⏱${fmtSec(elapsed)}\n`;
+        }
+        rows.push([{ text: `⛔ Стоп: ${(task.description || 'задача').slice(0, 20)}`, callback_data: `fg_cancel_${tid}` }]);
       }
       msg += '\n';
     }
@@ -10697,7 +11773,6 @@ async function processUpdate(upd) {
       const done = Array.from(userBg.values()).filter(t => t.status === 'done').length;
       const errCount = userBg.size - running - done;
       msg += `🔄 𝗕𝗮𝗰𝗸𝗴𝗿𝗼𝘂𝗻𝗱 (${userBg.size}/${MAX_BG_TASKS_PER_USER}) │ ✅${done} ❌${errCount}\n`;
-      const rows = [];
       for (const [tid, t] of userBg) {
         const elapsed = Math.round((Date.now() - t.startTime) / 1000);
         const statusIcon = t.status === 'running' ? fancySpin(elapsed) : t.status === 'done' ? '✅' : '❌';
@@ -10705,13 +11780,11 @@ async function processUpdate(upd) {
         msg += `${statusIcon} ${t.desc.slice(0, 28)}${pctBar} ${fmtSec(elapsed)}\n`;
         if (t.status === 'running') rows.push([{ text: `❌ Отменить: ${t.desc.slice(0, 20)}`, callback_data: `bg_cancel_${tid}` }]);
       }
-      msg += '━━━━━━━━━━━━━━━━━━━━';
-      rows.push([{ text: '◀️ Назад', callback_data: 'back' }]);
-      send(chatId, msg, { reply_markup: { inline_keyboard: rows } });
-    } else {
-      msg += '━━━━━━━━━━━━━━━━━━━━';
-      send(chatId, msg);
     }
+    msg += '━━━━━━━━━━━━━━━━━━━━';
+    if (fgTasks.size + userBg.size > 1) rows.push([{ text: '⛔ Остановить всё', callback_data: 'stop_agents' }]);
+    rows.push([{ text: '◀️ Назад', callback_data: 'back' }]);
+    send(chatId, msg, { reply_markup: { inline_keyboard: rows } });
     return;
   }
 
@@ -10818,8 +11891,11 @@ async function processUpdate(upd) {
   }
 
   if (currentFgCount > 0) {
-    send(chatId, `▶️ Запускаю параллельно (${currentFgCount + 1}/${MAX_CONCURRENT_TASKS_PER_USER})`).then(r => autoDeleteMsg(chatId, r?.result?.message_id));
+    send(chatId, `⚡ Запускаю параллельно (${currentFgCount + 1}/${MAX_CONCURRENT_TASKS_PER_USER}) — обрабатываю одновременно`).then(r => autoDeleteMsg(chatId, r?.result?.message_id, 5000));
   }
+
+  // Typing indicator для пользователя пока идёт обработка
+  tgApi('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {});
 
   // Zep + local memory: prefetch context
   zepMemory.prefetchContext(chatId, text).catch(() => { });
@@ -11112,6 +12188,10 @@ function gracefulShutdown(signal) {
 
   if (miniappServer) miniappServer.close();
 
+  // Закрываем браузерные сессии (оба движка)
+  try { browserManager?.destroyAll(); } catch (e) { }
+  try { chromeMcpBrowser?.destroyAll(); } catch (e) { }
+
   // Отключаем MTProto
   if (mtClient) {
     mtClient.disconnect().catch(() => { });
@@ -11291,6 +12371,7 @@ tgApi('setMyCommands', {
     { command: 'menu', description: '📋 Открыть меню' },
     { command: 'settings', description: '⚙️ Настройки' },
     { command: 'mode', description: '🎭 Режимы AI' },
+    { command: 'profile', description: '👤 Профиль и статистика' },
     { command: 'help', description: '❓ Помощь' },
     { command: 'tasks', description: '📋 Активные задачи' },
     { command: 'stop', description: '⛔ Остановить задачу' },

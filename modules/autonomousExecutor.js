@@ -22,7 +22,7 @@ class ToolRouter {
   async route(chatId, toolName, params = {}) {
     // 1) Delegate to sub-agent
     if (toolName === 'delegate' || toolName === 'sub_agent') {
-      const { role = 'coder', task, context = '', maxSteps = 7 } = params;
+      const { role = 'coder', task, context = '', maxSteps = 15 } = params;
       return this.runSubAgentLoop(chatId, task, role, context, maxSteps);
     }
 
@@ -309,7 +309,7 @@ Respond with ONLY valid JSON (no markdown, no explanation):
           role: step.role,
           task: step.task,
           context: depsContext,
-          maxSteps: 7,
+          maxSteps: 15,
         });
       } else {
         // Simple step — direct tool call
