@@ -23,7 +23,7 @@ class SkillManager {
     this.executeAction = executeAction;
     this.runSubAgentLoop = runSubAgentLoop;
     this.skills = new Map();
-    this.executionLog = [];
+    this._saveDebounceTimer = null;
     this._loadIndex();
   }
 
@@ -53,13 +53,17 @@ class SkillManager {
   }
 
   _saveIndex() {
-    try {
-      const dir = path.dirname(SKILLS_INDEX_FILE);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(SKILLS_INDEX_FILE, JSON.stringify(Object.fromEntries(this.skills), null, 2));
-    } catch (e) {
-      console.error('[SkillManager] Save error:', e.message);
-    }
+    // Debounce: объединяем несколько записей в одну (500ms)
+    if (this._saveDebounceTimer) clearTimeout(this._saveDebounceTimer);
+    this._saveDebounceTimer = setTimeout(() => {
+      try {
+        const dir = path.dirname(SKILLS_INDEX_FILE);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(SKILLS_INDEX_FILE, JSON.stringify(Object.fromEntries(this.skills), null, 2));
+      } catch (e) {
+        console.error('[SkillManager] Save error:', e.message);
+      }
+    }, 500);
   }
 
   /**

@@ -134,7 +134,7 @@ class Orchestrator {
       };
     } catch (e) {
       const duration = Date.now() - startTime;
-      this._recordResult('error', false, duration, taskDescription);
+      this._recordResult(strategy?.type || 'direct', false, duration, taskDescription);
       return { taskId, success: false, error: e.message, duration };
     }
   }

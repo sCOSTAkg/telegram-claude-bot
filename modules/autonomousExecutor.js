@@ -214,7 +214,7 @@ Respond with ONLY valid JSON (no markdown, no explanation):
       parsed = JSON.parse(jsonMatch[1].trim());
     } catch (e) {
       // Try to extract JSON object directly
-      const objMatch = planText.match(/\{[\s\S]*\}/);
+      const objMatch = planText.match(/\{[\s\S]*?\}/) || planText.match(/\{[\s\S]*\}/);
       if (objMatch) parsed = JSON.parse(objMatch[0]);
       else throw new Error(`Failed to parse plan: ${e.message}`);
     }
@@ -255,7 +255,7 @@ Respond with ONLY valid JSON (no markdown, no explanation):
         if (s.status !== 'pending') return false;
         return s.deps.every(depId => {
           const dep = plan.steps.find(x => x.id === depId);
-          return dep && (dep.status === 'done' || dep.status === 'failed');
+          return dep && dep.status === 'done';
         });
       });
 
@@ -387,12 +387,11 @@ Respond with ONLY valid JSON (no markdown, no explanation):
 
   _savePlanState(chatId, taskId, plan) {
     try {
-      const dir = path.join(this.persistDir, String(chatId));
+      const safeChatId = String(chatId).replace(/[^a-zA-Z0-9_-]/g, '_');
+      const safeTaskId = String(taskId).replace(/[^a-zA-Z0-9_-]/g, '_');
+      const dir = path.join(this.persistDir, safeChatId);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      const targetPath = path.join(dir, `${taskId}.json`);
-      const tmpPath = targetPath + '.tmp';
-      fs.writeFileSync(tmpPath, JSON.stringify(plan, null, 2));
-      fs.renameSync(tmpPath, targetPath);
+      fs.writeFileSync(path.join(dir, `${safeTaskId}.json`), JSON.stringify(plan, null, 2));
     } catch (e) {
       console.error(`[AutonomousExecutor] Save error: ${e.message}`);
     }
@@ -400,7 +399,9 @@ Respond with ONLY valid JSON (no markdown, no explanation):
 
   _loadPlanState(chatId, taskId) {
     try {
-      const filePath = path.join(this.persistDir, String(chatId), `${taskId}.json`);
+      const safeChatId = String(chatId).replace(/[^a-zA-Z0-9_-]/g, '_');
+      const safeTaskId = String(taskId).replace(/[^a-zA-Z0-9_-]/g, '_');
+      const filePath = path.join(this.persistDir, safeChatId, `${safeTaskId}.json`);
       if (!fs.existsSync(filePath)) return null;
       return JSON.parse(fs.readFileSync(filePath, 'utf8'));
     } catch (_) {

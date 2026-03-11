@@ -322,10 +322,15 @@ function parseJSON(text) {
   if (fenceMatch) {
     try { return JSON.parse(fenceMatch[1].trim()); } catch (e) { /* continue */ }
   }
-  // Try extracting first { ... } block
-  const braceMatch = text.match(/\{[\s\S]*\}/);
+  // Try extracting first { ... } block (non-greedy to avoid capturing trailing text)
+  const braceMatch = text.match(/\{[\s\S]*?\}/);
   if (braceMatch) {
     try { return JSON.parse(braceMatch[0]); } catch (e) { /* continue */ }
+  }
+  // Fallback: greedy match for nested objects
+  const greedyMatch = text.match(/\{[\s\S]*\}/);
+  if (greedyMatch && greedyMatch[0] !== braceMatch?.[0]) {
+    try { return JSON.parse(greedyMatch[0]); } catch (e) { /* continue */ }
   }
   return null;
 }

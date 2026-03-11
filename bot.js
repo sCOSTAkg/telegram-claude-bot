@@ -557,9 +557,11 @@ function buildClaudeCliArgs(modelId, messages, systemPrompt, allowMcp, chatId, e
           };
         }
         const tmpPath = path.join('/tmp', `mcp_${chatId || 'default'}_${Date.now()}.json`);
-        fs.writeFileSync(tmpPath, JSON.stringify(mergedConfig));
+        fs.writeFileSync(tmpPath, JSON.stringify(mergedConfig), { mode: 0o600 });
         args.push('--mcp-config', tmpPath);
-        setTimeout(() => { try { fs.unlinkSync(tmpPath); } catch (e) { } }, 300000);
+        // Cleanup: сразу добавляем в Set для гарантированной очистки + fallback таймер
+        _mcpTempFiles.add(tmpPath);
+        setTimeout(() => { try { fs.unlinkSync(tmpPath); } catch (e) { } _mcpTempFiles.delete(tmpPath); }, 300000);
       } else {
         args.push('--mcp-config', mcpSettingsPath);
       }
@@ -2065,6 +2067,8 @@ async function tgApi(method, body, timeout = 30000) {
       return { ok: false };
     }
   }
+  // Fallback: все итерации попали в continue (напр. 429 без исключения)
+  return { ok: false, error_code: 429, description: 'All retries exhausted (rate limited)' };
 }
 
 // Загрузка файлов (multipart) через execFile curl (без shell — защита от injection)
@@ -2081,6 +2085,8 @@ function tgUpload(method, chatId, fieldName, filePath, caption) {
 }
 
 async function send(chatId, text, opts = {}) {
+  if (!text) text = '(пустое сообщение)';
+  if (typeof text !== 'string') text = String(text);
   if (text.length > 4000) {
     const chunks = text.match(/[\s\S]{1,4000}/g) || [];
     let last;
@@ -2099,12 +2105,17 @@ setInterval(() => {
 }, 60000);
 
 async function editText(chatId, msgId, text, opts = {}) {
+  if (!text) return;
+  if (typeof text !== 'string') text = String(text);
   if (text.length > 4000) text = text.slice(0, 4000);
   const cached = _lastEditText.get(msgId);
   if (cached && cached.text === text) return; // пропуск дублей
   _lastEditText.set(msgId, { text, ts: Date.now() });
-  try { return await tgApi('editMessageText', { chat_id: chatId, message_id: msgId, text, ...opts }); }
-  catch (e) { if (!e.message?.includes('not modified')) console.error(`[editText] ${chatId}:`, e.message); }
+  const result = await tgApi('editMessageText', { chat_id: chatId, message_id: msgId, text, ...opts });
+  if (!result.ok && result.description && !result.description.includes('not modified')) {
+    console.error(`[editText] ${chatId}:`, result.description);
+  }
+  return result;
 }
 
 function del(chatId, msgId) { tgApi('deleteMessage', { chat_id: chatId, message_id: msgId }).catch(() => { }); }
@@ -2249,30 +2260,40 @@ async function editImage(chatId, imageBase64, instruction, opts = {}) {
 // === Veo: Поллинг long-running операции ===
 async function pollVideoOperation(operationName, key, prefix, onProgress) {
   const maxPolls = 120; // до 10 минут (5с * 120)
+  let networkErrors = 0;
   for (let i = 0; i < maxPolls; i++) {
     await new Promise(r => setTimeout(r, 5000));
-    const pollRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/${operationName}`, {
-      headers: { 'x-goog-api-key': key },
-      signal: AbortSignal.timeout(15000),
-    });
-    const pollData = await pollRes.json();
-    if (pollData.error) throw new Error(pollData.error.message);
-    if (pollData.done) {
-      const videos = pollData.response?.generateVideoResponse?.generatedSamples || pollData.response?.generatedSamples || [];
-      if (videos.length === 0) throw new Error('Видео не сгенерировано');
-      const videoUri = videos[0].video?.uri;
-      if (!videoUri) throw new Error('Нет URI видео');
-      const videoPath = `/tmp/${prefix}_${Date.now()}.mp4`;
-      const dlUrl = videoUri.includes('?') ? `${videoUri}&key=${key}` : `${videoUri}?key=${key}`; // key in URL required for binary download
-      await new Promise((resolve) => {
-        execFile('curl', ['-s', '-L', '-o', videoPath, dlUrl], { timeout: 120000 }, (err) => {
-          resolve(err ? null : videoPath);
-        });
+    try {
+      const pollRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/${operationName}`, {
+        headers: { 'x-goog-api-key': key },
+        signal: AbortSignal.timeout(15000),
       });
-      if (!fs.existsSync(videoPath) || fs.statSync(videoPath).size < 1000) throw new Error('Не удалось скачать видео');
-      return { path: videoPath, polls: i + 1 };
+      const pollData = await pollRes.json();
+      if (pollData.error) throw new Error(pollData.error.message);
+      networkErrors = 0; // reset on success
+      if (pollData.done) {
+        const videos = pollData.response?.generateVideoResponse?.generatedSamples || pollData.response?.generatedSamples || [];
+        if (videos.length === 0) throw new Error('Видео не сгенерировано');
+        const videoUri = videos[0].video?.uri;
+        if (!videoUri) throw new Error('Нет URI видео');
+        const videoPath = `/tmp/${prefix}_${Date.now()}.mp4`;
+        const dlUrl = videoUri.includes('?') ? `${videoUri}&key=${key}` : `${videoUri}?key=${key}`; // key in URL required for binary download
+        await new Promise((resolve) => {
+          execFile('curl', ['-s', '-L', '-o', videoPath, dlUrl], { timeout: 120000 }, (err) => {
+            resolve(err ? null : videoPath);
+          });
+        });
+        if (!fs.existsSync(videoPath) || fs.statSync(videoPath).size < 1000) throw new Error('Не удалось скачать видео');
+        return { path: videoPath, polls: i + 1 };
+      }
+      if (onProgress) onProgress(i + 1);
+    } catch (e) {
+      // Сетевая ошибка — терпим до 5 подряд, потом бросаем
+      if (e.message?.includes('сгенерировано') || e.message?.includes('URI') || e.message?.includes('скачать')) throw e;
+      networkErrors++;
+      if (networkErrors >= 5) throw new Error(`Поллинг прерван: ${networkErrors} сетевых ошибок подряд — ${e.message}`);
+      if (process.env.BOT_DEBUG) console.warn(`[pollVideo] сетевая ошибка #${networkErrors}: ${e.message}`);
     }
-    if (onProgress) onProgress(i + 1);
   }
   throw new Error('Тайм-аут генерации видео');
 }
@@ -2705,6 +2726,9 @@ function langMenu() {
 }
 
 // === Состояние ===
+// === MCP temp files tracking for cleanup ===
+const _mcpTempFiles = new Set();
+
 // === Переделанная система очереди: параллельная обработка ===
 // activeTasks: Map<chatId, Map<taskId, taskInfo>> - поддержка нескольких параллельных задач
 const activeTasks = new Map(); // chatId -> Map<taskId, taskInfo>
@@ -2834,7 +2858,10 @@ function getTaskHistory(chatId) {
   return taskHistories.get(chatId);
 }
 function getResourceMonitor(chatId) {
-  if (!resourceMonitors.has(chatId)) resourceMonitors.set(chatId, new ResourceMonitor());
+  if (!resourceMonitors.has(chatId)) {
+    resourceMonitors.set(chatId, new ResourceMonitor());
+    if (!resourceMonitorInterval) startResourceMonitoring(); // lazy start
+  }
   return resourceMonitors.get(chatId);
 }
 function getPhaseTracker(chatId, taskId = 'main') {
@@ -2859,7 +2886,7 @@ function startResourceMonitoring() {
 function stopResourceMonitoring() {
   if (resourceMonitorInterval) { clearInterval(resourceMonitorInterval); resourceMonitorInterval = null; }
 }
-startResourceMonitoring();
+// Note: monitoring starts lazily in getResourceMonitor() when first monitor is created
 
 // === CLEANUP OLD LOGS ===
 function cleanupOldStatusData() {
@@ -2867,9 +2894,11 @@ function cleanupOldStatusData() {
   const now = Date.now();
   for (const [chatId, history] of taskHistories) {
     const recentEntries = history.entries.filter(e => now - e.ts < MAX_HISTORY_AGE_MS);
+    if (recentEntries.length === 0) { taskHistories.delete(chatId); continue; }
     if (recentEntries.length < history.entries.length) history.entries = recentEntries;
   }
   for (const [chatId, monitor] of resourceMonitors) {
+    if (monitor.samples.length === 0) { resourceMonitors.delete(chatId); continue; }
     if (monitor.samples.length > 120) monitor.samples = monitor.samples.slice(-60);
   }
   for (const [chatId, trackersMap] of phaseTrackers) {
@@ -2879,6 +2908,27 @@ function cleanupOldStatusData() {
       if (isComplete && createdAgo > 60 * 60 * 1000) trackersMap.delete(taskId);
     }
     if (trackersMap.size === 0) phaseTrackers.delete(chatId);
+  }
+  // Чистка пустых chatLocks
+  for (const [chatId, lock] of chatLocks) {
+    if (!lock.locked && !activeTasks.has(chatId)) chatLocks.delete(chatId);
+  }
+  // Чистка пустых activeTasks/backgroundTasks entries
+  for (const [chatId, tasks] of activeTasks) {
+    if (tasks.size === 0) activeTasks.delete(chatId);
+  }
+  for (const [chatId, tasks] of backgroundTasks) {
+    if (tasks.size === 0) backgroundTasks.delete(chatId);
+  }
+  // Adaptive resource monitoring: stop if nobody is tracked
+  if (resourceMonitors.size === 0 && resourceMonitorInterval) stopResourceMonitoring();
+  // TTL-очистка sessionFrames: base64 данные съедают RAM
+  const SESSION_FRAMES_TTL = 30 * 60 * 1000; // 30 минут
+  for (const [chatId, frames] of sessionFrames) {
+    const lastActivity = frames.lastPhotoAt || frames.savedAt || 0;
+    if (lastActivity && now - lastActivity > SESSION_FRAMES_TTL) {
+      sessionFrames.delete(chatId);
+    }
   }
 }
 setInterval(cleanupOldStatusData, 60 * 60 * 1000);
@@ -2974,9 +3024,9 @@ function loadReminders() {
   const now = Date.now();
   for (const r of [...config.reminders]) {
     if (r.fireAt <= now) {
-      if (r.repeat && r.repeatInterval) {
+      if (r.repeat && r.repeatInterval > 0) {
         // Повторяющееся пропущенное — пропустить до следующего
-        while (r.fireAt <= now) r.fireAt += r.repeatInterval;
+        while (r.fireAt <= now) r.fireAt += Math.max(r.repeatInterval, 60000); // min 1 min guard
         const delay = r.fireAt - now;
         const timerId = setTimeout(() => fireReminder(r.id), delay);
         reminderTimers.set(r.id, timerId);
@@ -7030,8 +7080,10 @@ const validateActionBody = (actionName, body) => {
     if (isNaN(parseInt(lines[0]))) return { valid: false, error: 'remind first line must be minutes (number)' };
   }
   if (actionName === 'schedule') {
-    const lines = body.split('\n');
-    if (lines.length < 3) return { valid: false, error: 'schedule requires 3+ lines: minutes, action type, body' };
+    const lines = body.split('\n').filter(l => l.trim());
+    // Поддерживаем 2 формата: (1) task:+delay: ключи (2) старый: minutes, action, body
+    const hasTaskKey = /task:/i.test(body) && /delay:/i.test(body);
+    if (!hasTaskKey && lines.length < 3) return { valid: false, error: 'schedule requires "task:"+delay:" fields or 3+ lines: minutes, action type, body' };
   }
   if (actionName === 'write_file') {
     if (!/path:/i.test(body)) return { valid: false, error: 'write_file requires "path:" field' };
@@ -7732,12 +7784,12 @@ async function executeEditFileAction(chatId, body) {
   if (!content.includes(oldText)) {
     const trimmedOld = oldText.trim();
     if (trimmedOld && content.includes(trimmedOld)) {
-      content = content.replace(trimmedOld, newText.trim());
+      content = content.replaceAll(trimmedOld, newText.trim());
     } else {
       return { success: false, output: 'edit_file: old_text не найден в файле. Используй [ACTION: read_file] чтобы проверить содержимое.' };
     }
   } else {
-    content = content.replace(oldText, newText);
+    content = content.replaceAll(oldText, newText);
   }
   await fs.promises.writeFile(resolved, content, 'utf-8');
   const lineCount = content.split('\n').length;
@@ -12038,6 +12090,12 @@ function gracefulShutdown(signal) {
   if (mtClient) {
     mtClient.disconnect().catch(() => { });
   }
+
+  // Удаляем MCP temp files с API ключами
+  for (const tmpPath of _mcpTempFiles) {
+    try { fs.unlinkSync(tmpPath); } catch (e) { }
+  }
+  _mcpTempFiles.clear();
 
   // Удаляем PID файл
   try { fs.unlinkSync(PID_FILE); } catch (e) { }
