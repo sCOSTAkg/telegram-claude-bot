@@ -48,6 +48,10 @@ class ConcurrencyPool {
    * @returns {Promise} результат выполнения
    */
   submit(id, fn, meta = {}) {
+    // Guard: дубликат ID → отклоняем
+    if (this.running.has(id) || this.queue.some(q => q.id === id)) {
+      return Promise.reject(new Error(`Task ${id} already exists in pool`));
+    }
     const priority = meta.priority || 'medium';
     return new Promise((resolve, reject) => {
       const item = { id, fn, priority, meta, resolve, reject };
@@ -70,10 +74,17 @@ class ConcurrencyPool {
   _run(item) {
     const { id, fn, meta, resolve, reject } = item;
     const startTime = Date.now();
+    const TASK_TIMEOUT = meta.timeout || 300000; // 5 мин по умолчанию
 
-    this.events.emit('started', { id, meta, activeCount: this.running.size + 1 });
+    // ВАЖНО: set ПЕРЕД fn() — иначе синхронный resolve удалит несуществующую запись
+    this.running.set(id, { promise: null, meta, startTime });
+    this.events.emit('started', { id, meta, activeCount: this.running.size });
 
-    const promise = fn()
+    const timeoutPromise = new Promise((_, rej) =>
+      setTimeout(() => rej(new Error(`Task ${id} timed out after ${TASK_TIMEOUT}ms`)), TASK_TIMEOUT)
+    );
+
+    const promise = Promise.race([fn(), timeoutPromise])
       .then(result => {
         this.running.delete(id);
         const duration = Date.now() - startTime;
@@ -94,7 +105,7 @@ class ConcurrencyPool {
         this._drain();
       });
 
-    this.running.set(id, { promise, meta, startTime });
+    this.running.get(id).promise = promise;
   }
 
   _drain() {
@@ -370,10 +381,14 @@ Rules:
     const parsed = JSON.parse(jsonMatch[0]);
     if (!Array.isArray(parsed) || parsed.length === 0) return null;
 
+    const count = parsed.length;
     return parsed.map((item, idx) => ({
       role: item.role || roles[idx % roles.length],
       task: item.task || taskText,
-      deps: Array.isArray(item.deps) ? item.deps : [],
+      // Валидация: deps должны ссылаться на существующие индексы и не на себя
+      deps: Array.isArray(item.deps)
+        ? item.deps.filter(d => Number.isInteger(d) && d >= 0 && d < count && d !== idx)
+        : [],
       priority: item.priority || 'medium',
     }));
   } catch (e) {
@@ -430,8 +445,9 @@ async function executeParallelSubtasks(chatId, subtasks, pool, runSubAgentLoop, 
 
     const batchResults = await Promise.allSettled(promises);
 
-    for (const br of batchResults) {
-      const { idx, result } = br.status === 'fulfilled' ? br.value : { idx: ready[0], result: { success: false, output: br.reason?.message || 'Error', actions: [] } };
+    for (let i = 0; i < batchResults.length; i++) {
+      const br = batchResults[i];
+      const { idx, result } = br.status === 'fulfilled' ? br.value : { idx: ready[i], result: { success: false, output: br.reason?.message || 'Error', actions: [] } };
       results.set(idx, result);
       pending.delete(idx);
       totalDone++;

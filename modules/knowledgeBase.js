@@ -24,15 +24,18 @@ class WriteQueue {
   async _drain() {
     if (this._running) return;
     this._running = true;
-    while (this._queue.length > 0) {
-      const { fn, resolve, reject } = this._queue.shift();
-      try {
-        resolve(await fn());
-      } catch (e) {
-        reject(e);
+    try {
+      while (this._queue.length > 0) {
+        const { fn, resolve, reject } = this._queue.shift();
+        try {
+          resolve(await fn());
+        } catch (e) {
+          reject(e);
+        }
       }
+    } finally {
+      this._running = false;
     }
-    this._running = false;
   }
 }
 
@@ -47,6 +50,7 @@ class KnowledgeBaseSession {
     this._chatId = chatId;
     this._notebookId = null;
     this._writeQueue = new WriteQueue();
+    this._createdAt = Date.now();
   }
 
   get notebookId() { return this._notebookId; }
@@ -179,6 +183,16 @@ const kbManager = {
 
   destroy(chatId) {
     this.sessions.delete(chatId);
+  },
+
+  /** Удалить сессии старше maxAge мс (по умолчанию 60 мин) */
+  cleanup(maxAgeMs = 60 * 60 * 1000) {
+    const now = Date.now();
+    for (const [chatId, session] of this.sessions) {
+      if (session._createdAt && now - session._createdAt > maxAgeMs) {
+        this.sessions.delete(chatId);
+      }
+    }
   },
 
   shouldUseKB(goal, subtaskCount) {
