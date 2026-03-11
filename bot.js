@@ -19,6 +19,10 @@ const { DynamicAgentCreator } = require('./modules/dynamicAgentCreator');
 const { SkillManager } = require('./modules/skillManager');
 const { IntegrationHub } = require('./modules/integrationHub');
 const { Orchestrator } = require('./modules/orchestrator');
+const { BrowserManager } = require('./modules/browserManager');
+
+// === Browser automation ===
+const browserManager = new BrowserManager();
 
 // === Parallel Engine: глобальный пул конкурентности ===
 const globalPool = new ConcurrencyPool(4); // макс 4 параллельных AI-вызова
@@ -2480,16 +2484,20 @@ function mainMenu(chatId) {
     { text: `🧠 ${modelShort} — ⟳`, callback_data: 'set_model' },
   ]);
 
-  // Медиа + Инструменты
+  // Quick Actions — самые частые операции без подменю
   rows.push([
-    { text: '🎨 Медиа', callback_data: 'media_menu' },
-    { text: '🛠 Инструменты', callback_data: 'tools_menu' },
+    { text: '🎨 Нарисовать', callback_data: 'quick_image' },
+    { text: '🎬 Видео', callback_data: 'quick_video' },
+    { text: '📝 Текст', callback_data: 'quick_text' },
   ]);
 
-  // Основные разделы (3 в ряд)
+  // Основные разделы
+  rows.push([
+    { text: '🎭 Режимы', callback_data: 'modes_menu' },
+    { text: '🛠 Инструменты', callback_data: 'tools_menu' },
+  ]);
   rows.push([
     { text: '🤖 Агенты', callback_data: 'agents_menu' },
-    { text: '🎭 Режимы', callback_data: 'modes_menu' },
     { text: '⚡ Навыки', callback_data: 'skills_menu' },
   ]);
 
@@ -2518,6 +2526,7 @@ function mediaMenu(chatId) {
     reply_markup: {
       inline_keyboard: [
         [{ text: '🎨 Создать изображение', callback_data: 'media_gen_image' }],
+        [{ text: '✏️ Редактировать фото', callback_data: 'media_edit_image' }],
         [{ text: '🎬 Создать видео', callback_data: 'media_gen_video' }],
         [{ text: '🎬 Продолжить видео', callback_data: 'media_extend_video' }],
         [{ text: '📐 Сценарий (раскадровка)', callback_data: 'media_scenario' }],
@@ -2532,26 +2541,32 @@ function mediaMenu(chatId) {
 }
 
 function toolsMenu(chatId) {
+  // Считаем активные напоминания
+  const reminders = [];
+  if (reminderTimers.has(chatId)) {
+    for (const [id, r] of reminderTimers.get(chatId)) reminders.push(r);
+  }
+  const remBadge = reminders.length > 0 ? ` (${reminders.length})` : '';
+
+  // Считаем задачи
+  const todos = (config.todos || []).filter(t => t.chatId === chatId);
+  const todoBadge = todos.length > 0 ? ` (${todos.length})` : '';
+
   return {
     reply_markup: {
       inline_keyboard: [
         [{ text: '📓 База знаний (NotebookLM)', callback_data: 'nb_menu' }],
         [{ text: '🔗 Интеграции (MCP)', callback_data: 'integrations' }],
         [
-          { text: '🌤 Погода', callback_data: 'plug_weather' },
-          { text: '💱 Курсы', callback_data: 'plug_exchange' },
+          { text: '📤 Экспорт чата', callback_data: 'export_chat' },
+          { text: '🔍 Веб-поиск', callback_data: 'quick_search' },
         ],
         [
-          { text: '₿ Крипто', callback_data: 'plug_crypto' },
-          { text: '🌍 Перевод', callback_data: 'plug_translate' },
+          { text: `✅ Задачи${todoBadge}`, callback_data: 'plug_todo' },
+          { text: `⏰ Напоминания${remBadge}`, callback_data: 'reminders_list' },
         ],
         [
-          { text: '🔗 QR-код', callback_data: 'plug_qr' },
-          { text: '⏲ Помодоро', callback_data: 'plug_pomodoro' },
-        ],
-        [
-          { text: '📝 Заметки', callback_data: 'plug_notes' },
-          { text: '✅ Задачи', callback_data: 'plug_todo' },
+          { text: '🎨 Медиа', callback_data: 'media_menu' },
         ],
         [{ text: '◀️ Назад', callback_data: 'back' }],
       ]
@@ -2778,6 +2793,8 @@ let waitingExchangeQuery = new Set(); // chatId -> ожидание запрос
 let waitingCryptoQuery = new Set(); // chatId -> ожидание запроса крипто
 let waitingTranslateQuery = new Set(); // chatId -> ожидание текста для перевода
 let waitingQRText = new Set(); // chatId -> ожидание текста для QR
+let waitingTextPrompt = new Set(); // chatId -> ожидание задания для текста
+let waitingSearchQuery = new Set(); // chatId -> ожидание поискового запроса
 const mediaGroupBuffer = new Map(); // groupId -> { chatId, photos: [], caption, timer }
 const sessionFrames = new Map(); // chatId -> { startFrame, endFrame, referenceImage, lastPhoto, lastPhotos: [], startPath, endPath, refPath, lastPhotoPath, lastPhotosPaths: [], savedAt }
 let offset = 0;
@@ -2790,7 +2807,8 @@ function clearAllWaiting(chatId) {
     waitingAuthPhone, waitingAuthCode, waitingAuthPassword, waitingNbCreate, waitingNbResearch,
     waitingSkillName, waitingAgentName, waitingMcpUrl,
     waitingImagePrompt, waitingVideoPrompt, waitingWeatherCity, waitingExchangeQuery,
-    waitingCryptoQuery, waitingTranslateQuery, waitingQRText];
+    waitingCryptoQuery, waitingTranslateQuery, waitingQRText,
+    waitingTextPrompt, waitingSearchQuery];
   const maps = [waitingChannelKeywords, waitingChannelPrompt, waitingNbQuery, waitingNbUrl,
     waitingNbText, waitingNbRename, waitingNbReportCustom,
     waitingSkillPrompt, waitingSkillEditName, waitingSkillEditPrompt, waitingSkillEditDesc,
@@ -2977,6 +2995,54 @@ function loadReminders() {
 
 loadReminders();
 
+// === Экспорт истории чата ===
+async function exportChatHistory(chatId) {
+  const history = chatHistory.get(chatId);
+  if (!history || history.length === 0) {
+    send(chatId, '📭 История чата пуста. Напишите что-нибудь, чтобы она появилась.');
+    return;
+  }
+  const lines = [];
+  lines.push(`=== Экспорт чата ===`);
+  lines.push(`Дата: ${new Date().toLocaleString('ru-RU')}`);
+  lines.push(`Сообщений: ${history.length}`);
+  lines.push('');
+  for (const msg of history) {
+    const role = msg.role === 'user' ? '👤 Вы' : '🤖 AI';
+    lines.push(`${role}:`);
+    lines.push(msg.text || msg.content || '');
+    lines.push('');
+  }
+  const tmpFile = `/tmp/chat_export_${chatId}_${Date.now()}.txt`;
+  fs.writeFileSync(tmpFile, lines.join('\n'), 'utf8');
+  try {
+    await sendDocument(chatId, tmpFile, `📤 Экспорт чата (${history.length} сообщений)`);
+  } catch (e) {
+    send(chatId, `❌ Ошибка экспорта: ${e.message}`);
+  }
+  try { fs.unlinkSync(tmpFile); } catch {}
+}
+
+// === Меню напоминаний ===
+function remindersMenu(chatId) {
+  const userReminders = (config.reminders || []).filter(r => r.chatId === chatId);
+  if (userReminders.length === 0) {
+    send(chatId, '⏰ У вас нет активных напоминаний.\n\nНапишите: «напомни через 2 часа позвонить»');
+    return;
+  }
+  const rows = [];
+  for (const r of userReminders) {
+    const timeLeft = r.fireAt - Date.now();
+    const mins = Math.max(0, Math.round(timeLeft / 60000));
+    const timeStr = mins >= 60 ? `${Math.floor(mins / 60)}ч ${mins % 60}м` : `${mins}м`;
+    const repeat = r.repeat ? ' 🔄' : '';
+    rows.push([{ text: `⏰ ${r.text.slice(0, 30)}${r.text.length > 30 ? '…' : ''} — ${timeStr}${repeat}`, callback_data: `noop_${r.id}` }]);
+    rows.push([{ text: '❌ Отменить', callback_data: `cancel_reminder_${r.id}` }]);
+  }
+  rows.push([{ text: '◀️ Назад', callback_data: 'tools_menu' }]);
+  send(chatId, `⏰ Активные напоминания (${userReminders.length}):`, { reply_markup: { inline_keyboard: rows } });
+}
+
 // === Задачи (todo, персистентные) ===
 // config.todos = [{ id, chatId, text, status:'pending'|'in_progress'|'done', createdAt, dueAt?, priority?, category? }]
 let nextTodoId = 1;
@@ -2998,10 +3064,17 @@ async function fireScheduledAction(id) {
   scheduledTimers.delete(id);
   send(action.chatId, `⏰ Выполняю запланированное действие: ${action.description || action.actionName}`);
   try {
-    const result = await executeAction(action.chatId, { name: action.actionName, body: action.actionBody });
-    if (result && !result.silent) {
-      const icon = result.success ? '✅' : '❌';
-      send(action.chatId, `${icon} Результат: ${(result.output || '').slice(0, 2000)}`);
+    if (action.actionName === 'agent') {
+      // Полный агентный цикл через runClaude — доступ ко всем 39+ экшенам
+      const taskPrompt = action.actionBody || action.description;
+      const contextNote = action.context ? `\n\nКонтекст: ${action.context}` : '';
+      await runClaude(action.chatId, `[SCHEDULED TASK] ${taskPrompt}${contextNote}`, { scheduled: true });
+    } else {
+      const result = await executeAction(action.chatId, { name: action.actionName, body: action.actionBody });
+      if (result && !result.silent) {
+        const icon = result.success ? '✅' : '❌';
+        send(action.chatId, `${icon} Результат: ${(result.output || '').slice(0, 2000)}`);
+      }
     }
   } catch (e) {
     send(action.chatId, `❌ Ошибка запланированного действия: ${e.message}`);
@@ -3786,6 +3859,56 @@ async function handleCallback(cb) {
     if (msgId) tgApi('deleteMessage', { chat_id: chatId, message_id: msgId }).catch(() => {});
     runClaude(chatId, 'Покажи мой список задач');
   }
+  // === Quick Actions из главного меню ===
+  else if (data === 'quick_image') {
+    clearAllWaiting(chatId);
+    waitingImagePrompt.add(chatId);
+    setWaitingTimeout(chatId, waitingImagePrompt, 'waitingImagePrompt');
+    if (msgId) tgApi('deleteMessage', { chat_id: chatId, message_id: msgId }).catch(() => {});
+    send(chatId, '🎨 Опишите что нарисовать:', { reply_markup: { inline_keyboard: [[{ text: '◀️ Отмена', callback_data: 'back' }]] } });
+  }
+  else if (data === 'quick_video') {
+    clearAllWaiting(chatId);
+    waitingVideoPrompt.add(chatId);
+    setWaitingTimeout(chatId, waitingVideoPrompt, 'waitingVideoPrompt');
+    if (msgId) tgApi('deleteMessage', { chat_id: chatId, message_id: msgId }).catch(() => {});
+    send(chatId, '🎬 Опишите видео:', { reply_markup: { inline_keyboard: [[{ text: '◀️ Отмена', callback_data: 'back' }]] } });
+  }
+  else if (data === 'quick_text') {
+    clearAllWaiting(chatId);
+    waitingTextPrompt.add(chatId);
+    if (msgId) tgApi('deleteMessage', { chat_id: chatId, message_id: msgId }).catch(() => {});
+    send(chatId, '📝 Опишите что написать:\n\nНапример: «пост про AI для Instagram» или «письмо клиенту»', { reply_markup: { inline_keyboard: [[{ text: '◀️ Отмена', callback_data: 'back' }]] } });
+  }
+  else if (data === 'quick_search') {
+    clearAllWaiting(chatId);
+    waitingSearchQuery.add(chatId);
+    if (msgId) tgApi('deleteMessage', { chat_id: chatId, message_id: msgId }).catch(() => {});
+    send(chatId, '🔍 Что найти в интернете?', { reply_markup: { inline_keyboard: [[{ text: '◀️ Отмена', callback_data: 'back' }]] } });
+  }
+  else if (data === 'export_chat') {
+    if (msgId) tgApi('deleteMessage', { chat_id: chatId, message_id: msgId }).catch(() => {});
+    exportChatHistory(chatId);
+  }
+  else if (data === 'reminders_list') {
+    if (msgId) tgApi('deleteMessage', { chat_id: chatId, message_id: msgId }).catch(() => {});
+    remindersMenu(chatId);
+  }
+  else if (data.startsWith('cancel_reminder_')) {
+    const remId = parseInt(data.replace('cancel_reminder_', ''));
+    const timer = reminderTimers.get(remId);
+    if (timer) { clearTimeout(timer); reminderTimers.delete(remId); }
+    config.reminders = (config.reminders || []).filter(r => r.id !== remId);
+    saveConfig();
+    if (msgId) tgApi('deleteMessage', { chat_id: chatId, message_id: msgId }).catch(() => {});
+    send(chatId, '✅ Напоминание отменено');
+    remindersMenu(chatId);
+  }
+  else if (data === 'media_edit_image') {
+    clearAllWaiting(chatId);
+    if (msgId) tgApi('deleteMessage', { chat_id: chatId, message_id: msgId }).catch(() => {});
+    send(chatId, '✏️ Отправьте фото и опишите что изменить.\n\nНапример: отправьте фото + «убери фон» или «сделай ярче»');
+  }
   else if (data === 'help') await editText(chatId, msgId, helpText(), mainMenu(chatId));
   else if (data === 'stats') {
     const uc = getUserConfig(chatId);
@@ -4322,7 +4445,8 @@ MODEL: ${uc.model}`;
       }
       rows.push([{ text: '➕ Создать', callback_data: 'skill_create' }]);
       rows.push([{ text: '◀️ Назад', callback_data: 'back' }]);
-      await editText(chatId, msgId, `⚡ Навыки (${skills.length}):`, { reply_markup: { inline_keyboard: rows } });
+      const pageLabel = totalPages > 1 ? ` — стр. ${page + 1}/${totalPages}` : '';
+      await editText(chatId, msgId, `⚡ Навыки (${skills.length})${pageLabel}:`, { reply_markup: { inline_keyboard: rows } });
     }
   }
   else if (data === 'skill_create') {
@@ -4502,7 +4626,8 @@ MODEL: ${uc.model}`;
     }
     rows.push([{ text: '➕ Создать', callback_data: 'agent_create' }]);
     rows.push([{ text: '◀️ Назад', callback_data: 'back' }]);
-    await editText(chatId, msgId, `👥 Агенты (встроенных: ${builtinEntries.length - 1}, своих: ${custom.length})\n\nСтатус: ${agentOn ? '✅ Активна' : '❌ Выключена'}`, { reply_markup: { inline_keyboard: rows } });
+    const pageLabel = totalPages > 1 ? ` — стр. ${page + 1}/${totalPages}` : '';
+    await editText(chatId, msgId, `👥 Агенты (встроенных: ${builtinEntries.length - 1}, своих: ${custom.length})${pageLabel}\n\nСтатус: ${agentOn ? '✅ Активна' : '❌ Выключена'}`, { reply_markup: { inline_keyboard: rows } });
   }
   else if (data === 'prison_blocks') {
     // ═══ PRISON CELL BLOCKS DASHBOARD ═══
@@ -5771,37 +5896,27 @@ async function nbDirectGenerate(chatId, msgId, nbId, toolName, extraArgs, emoji,
 
 // === Помощь ===
 function helpText() {
-  return `🤖 *AI-ассистент* — просто напишите что нужно
+  return `🤖 *S.C.O.R.P.* — просто напишите что нужно
 
-💬 *Примеры запросов:*
-• "нарисуй кота в космосе" — создаст изображение
-• "сделай видео заката" — создаст видео
-• "напомни через 2 часа позвонить" — поставит напоминание
-• "добавь задачу: купить молоко" — добавит в список
-• "найди в интернете последние новости" — поищет в сети
-• "выполни: ls -la" — выполнит команду
-• "запомни: я люблю краткие ответы" — сохранит в памяти
+💬 *Примеры:*
+• «нарисуй кота в космосе» — изображение
+• «сделай видео заката» — видео
+• «напомни через 2ч позвонить» — напоминание
+• «найди в интернете новости AI» — веб-поиск
+• «напиши пост для Instagram» — генерация текста
+• «переведи на английский» — перевод
+• «выполни: npm init» — команды
 
-📋 *Меню:*
-🎨 Медиа — генерация изображений, видео, сценариев
-🛠 Инструменты — плагины (погода, курсы, крипто, перевод, QR)
-🤖 Агенты — специализированные AI-агенты
-🎭 Режимы — роли: разработчик, аналитик и 50+ других
-⚡ Навыки — сохранённые промпты
-📋 Задачи — статус + задачи + фоновые процессы
-⚙️ Настройки — модель, память, API ключи, помощь
+🚀 *Quick Actions в меню:*
+🎨 Нарисовать • 🎬 Видео • 📝 Текст
 
-📋 *Команды:*
-/menu — главное меню
-/settings — настройки
-/mode — режимы AI
-/stop — остановить задачу
-/clear — очистить историю
-/frames — кадры для видео
-/help — эта справка
+🛠 *Инструменты:*
+📓 База знаний • 📤 Экспорт • 🔍 Поиск • ⏰ Напоминания
 
-🎤 Голосовые распознаются автоматически
-📎 Принимает файлы, фото, документы`;
+📋 /menu • ⚙️ /settings • 🎭 /mode • 👤 /profile
+🔄 /clear • ⛔ /stop • ❓ /help
+
+🎤 Голос · 📎 Файлы · 📷 Фото — всё распознаётся`;
 }
 
 // === Bash команда ===
@@ -6408,6 +6523,15 @@ IMPORTANT: The user communicates in NATURAL LANGUAGE. There are no commands. Map
 - "schedule in.../in N hours do.../run later..." → [ACTION: schedule]
 - "run in background/do in background/async..." → [ACTION: background]
 
+**Browser & Web Automation:**
+- "open site/go to/navigate to/visit URL..." → [ACTION: browse] action: goto
+- "click button/press/tap element..." → [ACTION: browse] action: click
+- "fill form/type text/enter value/login..." → [ACTION: browse] action: type or fill_form
+- "screenshot/take screenshot/show page..." → [ACTION: browse] action: screenshot
+- "scrape/extract data/get text from page..." → [ACTION: browse] action: extract
+- "run JS on page/evaluate script..." → [ACTION: browse] action: evaluate
+- "close browser/end session..." → [ACTION: browse] action: close
+
 **Code & System:**
 - "run/execute command/install/deploy/check..." → [ACTION: bash]
 - "write code/create app/build project/fix bug/debug..." → [ACTION: delegate] role=coder
@@ -6545,6 +6669,14 @@ text: what to forget (for forget)
 auto: true
 [/ACTION]
 
+[ACTION: browse]
+action: goto|click|type|screenshot|evaluate|wait|scroll|extract|cookies_set|cookies_get|fill_form|tabs|tab_switch|tab_new|close|status
+url: https://example.com (for goto)
+selector: CSS selector or text content (for click/type/extract/wait)
+value: text to type (for type/fill_form)
+script: JS code (for evaluate)
+[/ACTION]
+
 [ACTION: figma]
 command: get_file|render|discover|tokens
 parameters (depend on the command)
@@ -6561,13 +6693,16 @@ repeat=daily
 priority=2
 category=personal
 \`\`\`
-3. **schedule** — schedule action. Line 1: time (number + unit: 30, 2h, 1d). Line 2: action type (bash|image|video|remind|file|delegate|mcp). Line 3: body (command/prompt). Line 4: description: description. Example:
+3. **schedule** — schedule a deferred task. Two formats:
+**New format (agent-based, preferred):** named fields for full agent execution:
 \`\`\`
-2h
-image
-A beautiful sunset over mountains
-description: Generate sunset in 2 hours
+task: Описание задачи целиком
+delay: 30m (или 2h, 1d)
+context: Зачем отложить (опционально)
+notify: yes/no (опционально)
 \`\`\`
+This schedules a FULL AGENT CYCLE (runClaude) — the agent can use ALL actions when the task fires.
+**Legacy format:** Line 1: time, Line 2: action type (bash|image|video|remind|file|mcp|agent), Line 3+: body.
 3.1. **todo** — create task. Line 1: task text. Optional: priority=1-3, category=work|personal|urgent, due=30m|2h|1d (deadline).
 4. **file** — send file. One line — path.
 5. **skill** — user skill. Line 1: name, Line 2: context.
@@ -6578,7 +6713,7 @@ description: Generate sunset in 2 hours
 9. **video** — video generation. Body: prompt in English. Autofallback via Veo 3.1 Fast → Veo 3.1 → Veo 2. Generates 30-120 seconds. Can animate user's photo if it was uploaded/generated recently.
 10. **video_extend** — extend existing video. Body: prompt for continuation. Use ONLY when the user explicitly asks to extend/continue the video.
 11. **figma** — work with Figma design. Commands: discover <url_or_file_key> (file structure), get_file <file_key> [node_ids], render <file_key> <node_id1> <node_id2> (render to PNG), styles <file_key>, components <file_key>. Use discover to find node_id, then render to send the image.
-12. **plan** — decompose the task into subtasks with dependencies. Does not execute — only plans.
+12. **plan** — decompose the task into subtasks with dependencies. Does not execute — only plans. Format: goal: ..., then subtasks: - id: N, role: X, task: Y, priority: high|medium|low, deps: [N], schedule: 2h (optional — deferred execution).
 13. **parallel** — parallel execution of up to 8 subagents. Blocks separated by ---. Each agent automatically gets a DIFFERENT AI model. Add "discuss: yes" — for final meeting and synthesis. You can specify "model: X" for a specific agent.
 14. **create_agent** — create a temporary agent with a specialization. Available for delegate/parallel.
 15. **supervise** — check agent status, plan, progress. For coordination of complex tasks.
@@ -6587,6 +6722,25 @@ description: Generate sunset in 2 hours
 18. **memory** — memory management. Commands: forget (forget a fact by text), list (show all facts). For forget: "forget that I am from Moscow" → forget + "Moscow".
 19. **execute_plan** — automatically execute the plan created via [ACTION: plan]. Tasks without dependencies run in parallel, dependent ones wait.
 20. **council** — multi-model council. Several AI models solve the task SIMULTANEOUSLY, then synthesis the best answer. Fields: task (text), type: fast|balanced|powerful. For complex tasks.
+21. **todo_manage** — programmatic task management. Operations: add: task text, complete: id, list: true, update: id, delete: id. Fields: priority: 1-3, due: 2h, category: work|personal|urgent, status: pending|in_progress|done. Use this to track your own progress on complex tasks.
+22. **quality_check** — AI-powered self-verification. Fields: criteria: (list with - prefix), target: (text to evaluate). Returns QA PASS or QA FAIL. Use after completing important tasks to verify quality.
+23. **browse** — real browser automation via Chrome. Opens a visible browser, navigates pages, clicks, types, takes screenshots. Sub-commands:
+  - **goto**: navigate to URL. Fields: url. Auto-sends screenshot to chat. SSRF-protected.
+  - **click**: click element. Fields: selector (CSS) or text content fallback.
+  - **type**: type into input. Fields: selector, value. Clears field first.
+  - **screenshot**: capture current page. Optional: full: true (full page).
+  - **evaluate**: run JavaScript on page. Fields: script. Returns result.
+  - **wait**: wait for element or time. Fields: selector (CSS) or seconds (max 30).
+  - **scroll**: scroll page. Fields: direction (up/down), amount (pixels, default 500).
+  - **extract**: extract text/links from elements. Fields: selector.
+  - **fill_form**: batch fill form fields. Fields: fields (key: value pairs, one per line).
+  - **cookies_set**: set cookie. Fields: domain, name, value.
+  - **cookies_get**: list all cookies.
+  - **tabs**: list open tabs. **tab_switch**: switch tab by index. **tab_new**: open new tab with url.
+  - **close**: close browser session and save cookies.
+  - **status**: show session info.
+  Sessions persist cookies across restarts. Auto-close after 15 min idle. Admin-only.
+  Multi-step example: goto → type login → type password → click submit → screenshot.
 
 ## Multi-model Work Strategy
 
@@ -6800,27 +6954,46 @@ Rules:
 6. **Match language**: ALWAYS respond in the user's language. If they write in Russian — respond in Russian.
 7. **No filler**: Never start with "Certainly!", "Of course!", "Sure!" — go straight to the point.
 
-## CRITICAL RULE: Never give up
+## ⚡ CRITICAL RULE: NEVER GIVE UP — ACHIEVE RESULTS NO MATTER WHAT
 
-- FORBIDDEN to say "I cannot", "it is impossible", "the tool doesn't work".
-- On an action error — analyze the error type:
-  * TIMEOUT → simplify the command, split into parts, remove unnecessary pipes
-  * PERMISSION DENIED → use another directory or delegate executor
-  * COMMAND NOT FOUND → use an alternative (node -e instead of python, curl instead of wget)
-  * API ERROR → try another API or another method
-  * FILE NOT FOUND → create the file via bash, then try again
-- On [ACTION: image] error — the system HAS ALREADY cycled through all 8 models. If still an error:
-  1. Rewrite the prompt (simplify, remove controversial content, translate to English)
-  2. Try [ACTION: image] again with the new prompt
-  3. SVG via node -e (for schemes/diagrams)
-  4. DO NOT generate HTML/code as a substitute for a photo
-- On [ACTION: video] error — the system has cycled through all 3 Veo models. If error:
-  1. Simplify the prompt (remove complex scenes, people)
-  2. Try [ACTION: video] with a short prompt in English
-  3. Offer to generate an image instead of a video
-- You ALWAYS come back with a result. You have enough tools: bash, delegate, image, video, file, skill.
-- If 2 attempts of the same approach fail — CHANGE THE APPROACH COMPLETELY.
-- The user MUST NEVER see raw code instead of a result.`;
+### Mindset
+- You are a PROBLEM SOLVER, not a reporter of failures.
+- FORBIDDEN to say "I cannot", "it is impossible", "the tool doesn't work", "I was unable to".
+- EVERY task has a solution. If the direct path fails — find an indirect one.
+- The user hired you to GET RESULTS, not to explain why something failed.
+
+### Error Recovery Strategy (apply in order)
+1. **Same tool, different params** — change command, flags, syntax, wording
+2. **Alternative tool** — bash↔delegate, web_fetch↔curl, search↔web_fetch
+3. **Decompose** — break big task into 2-3 smaller independent tasks
+4. **Delegate** — pass to a specialist subagent (coder, executor, researcher)
+5. **Creative workaround** — node -e instead of python, SVG instead of image API, curl instead of fetch
+6. **Partial result** — deliver what you CAN, then explain what's pending
+
+### Error-Specific Playbook
+| Error | Action 1 | Action 2 | Action 3 |
+|-------|----------|----------|----------|
+| TIMEOUT | Split command, add timeout flag | node -e alternative | delegate executor |
+| PERMISSION DENIED | Use /tmp/, change directory | delegate executor | create via heredoc |
+| COMMAND NOT FOUND | node -e, npx, full path /opt/homebrew/bin/ | curl | delegate |
+| API ERROR | Different API/endpoint | bash curl | web_fetch |
+| FILE NOT FOUND | mkdir -p + create | find/ls to locate | bash heredoc |
+| IMAGE FAILED | Rewrite prompt radically (short English) | Try again | SVG via node -e |
+| VIDEO FAILED | Simplify prompt (1 sentence English) | Try again | Offer image instead |
+| DELEGATE FAILED | Different role | Simpler task description | Do it yourself via bash |
+| MCP FAILED | Check server ID | bash curl API directly | delegate |
+
+### Persistence Rules
+- After 1 failed attempt: retry with MODIFIED parameters
+- After 2 failed attempts of same approach: SWITCH to a completely different tool/action
+- After 3+ failures: DECOMPOSE the task or DELEGATE to specialist
+- NEVER repeat the EXACT same action that already failed
+- NEVER give up without trying at least 3 DIFFERENT approaches
+- ALWAYS provide the user with SOMETHING — even a partial result is better than "failed"
+- If ALL automated approaches fail, explain what you tried and suggest a manual alternative
+
+### The Golden Rule
+**The user must ALWAYS receive a concrete result or a clear next step — NEVER just an error message.**`;
 
 // === Agent: парсинг действий ===
 function parseAction(text) {
@@ -6883,56 +7056,92 @@ const validateActionBody = (actionName, body) => {
 };
 
 // === Error-type-aware retry guidance + self-learning ===
-const getRetryGuidance = (actionName, errorOutput) => {
+// Таблица альтернативных действий — если основное не работает
+const ACTION_ALTERNATIVES = {
+  bash: ['delegate', 'mcp'],
+  image: ['delegate', 'bash'], // SVG через node -e
+  video: ['image'], // fallback на изображение
+  file: ['bash'],
+  mcp: ['bash', 'delegate', 'web_fetch'],
+  read_file: ['bash'],
+  edit_file: ['bash', 'write_file'],
+  write_file: ['bash'],
+  web_fetch: ['bash', 'search', 'delegate'],
+  http_request: ['bash', 'web_fetch'],
+  search: ['web_fetch', 'delegate', 'bash'],
+  delegate: ['parallel', 'bash', 'council'],
+  parallel: ['delegate'],
+  plan: ['delegate', 'parallel'],
+};
+
+const getRetryGuidance = (actionName, errorOutput, retryCount = 0) => {
   const err = errorOutput.toLowerCase();
-  const base = 'Действие не удалось. ЗАПРЕЩЕНО сдаваться. ';
+  const base = '⚠️ ДЕЙСТВИЕ НЕ УДАЛОСЬ. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО СДАВАТЬСЯ. ';
   let guidance = '';
+
+  // Уровень агрессивности зависит от номера попытки
+  const escalation = retryCount >= 2
+    ? '\n\n🔥 КРИТИЧЕСКАЯ ЭСКАЛАЦИЯ: Это уже попытка #' + (retryCount + 1) + '. КАРДИНАЛЬНО смени подход. Используй СОВЕРШЕННО ДРУГОЕ действие. '
+    : '';
+
+  // Альтернативные действия для подсказки
+  const alts = ACTION_ALTERNATIVES[actionName] || ['bash', 'delegate'];
+  const altHint = `\n\n💡 Альтернативные действия: ${alts.map(a => `[ACTION: ${a}]`).join(', ')}`;
 
   if (actionName === 'bash') {
     if (err.includes('тайм-аут') || err.includes('timeout'))
-      guidance = `${base}Команда зависла. Оптимизируй: разбей на части, убери pipe в pipe, добавь timeout, или используй другой подход.`;
+      guidance = `${base}Команда зависла. СТРАТЕГИИ: 1) Разбей на 2-3 мелких команды. 2) Добавь timeout 10. 3) Убери лишние pipe. 4) Используй node -e вместо сложных bash-конструкций.${escalation}`;
     else if (err.includes('permission denied') || err.includes('запрещён'))
-      guidance = `${base}Нет прав. Попробуй: другую директорию или другую команду.`;
+      guidance = `${base}Нет прав. СТРАТЕГИИ: 1) Используй /tmp/ директорию. 2) Делегируй executor субагенту. 3) Создай файл в рабочей директории. 4) Используй node -e для обхода ограничений shell.${escalation}`;
     else if (err.includes('not found') || err.includes('command not found'))
-      guidance = `${base}Команда не найдена. Используй альтернативу (node -e вместо python, curl вместо wget). Помни: Python НЕ установлен.`;
+      guidance = `${base}Команда не найдена. АЛЬТЕРНАТИВЫ: node -e (вместо python), curl (вместо wget), npx (для npm-пакетов), /opt/homebrew/bin/ (полные пути). Python НЕ установлен — используй ТОЛЬКО node.${escalation}`;
     else if (err.includes('заблокировано') || err.includes('blocked'))
-      guidance = `${base}Команда заблокирована. Используй безопасную альтернативу.`;
+      guidance = `${base}Команда заблокирована. Используй безопасную альтернативу: node -e, curl, или делегируй через [ACTION: delegate] role=executor.${escalation}`;
+    else if (err.includes('enoent') || err.includes('no such file'))
+      guidance = `${base}Файл/директория не существует. 1) Создай через mkdir -p. 2) Проверь путь через ls. 3) Используй абсолютные пути.${escalation}`;
     else
-      guidance = `${base}Измени команду: используй другой синтаксис, другие флаги, или разбей на подкоманды.`;
+      guidance = `${base}Измени подход: 1) Другой синтаксис/флаги. 2) Разбей на подкоманды. 3) node -e вместо bash. 4) Делегируй специалисту.${escalation}`;
   } else if (actionName === 'image')
-    guidance = `${base}Генерация изображения не удалась. Создай визуал через bash (SVG через node -e, или HTML-макет). НЕ отправляй сырой код пользователю.`;
+    guidance = `${base}Генерация изображения не удалась (все модели уже перебраны). СТРАТЕГИИ: 1) Полностью перепиши промпт — проще, короче, на English. 2) Убери спорный контент. 3) SVG через node -e для диаграмм. 4) Попробуй [ACTION: image] ещё раз с радикально другим описанием.${escalation}`;
+  else if (actionName === 'video')
+    guidance = `${base}Видео не удалось. СТРАТЕГИИ: 1) Упрости промпт до 1-2 предложений. 2) Убери людей/лица из описания. 3) Попробуй короткий промпт только на English. 4) Предложи [ACTION: image] как альтернативу.${escalation}`;
   else if (actionName === 'file')
-    guidance = `${base}Файл не найден или недоступен. Создай файл через [ACTION: bash], затем отправь через [ACTION: file].`;
+    guidance = `${base}Файл недоступен. 1) Проверь путь через [ACTION: bash] ls. 2) Создай файл через bash. 3) Используй абсолютный путь.${escalation}`;
   else if (actionName === 'mcp') {
     if (err.includes('не найден') || err.includes('not found'))
-      guidance = `${base}MCP-сервер не найден. Проверь id/имя сервера в списке интеграций (Настройки → Интеграции). Используй server: с точным id или именем из списка.`;
+      guidance = `${base}MCP-сервер не найден. 1) Проверь точный id в Настройках → Интеграции. 2) Попробуй без server:, только tool:. 3) Альтернатива: [ACTION: bash] curl для API, [ACTION: delegate] для задачи.${escalation}`;
     else if (err.includes('http') || err.includes('econnrefused') || err.includes('timeout'))
-      guidance = `${base}MCP-сервер недоступен. Проверь URL и ключ в Настройках → Интеграции, или попробуй другой инструмент/действие.`;
+      guidance = `${base}MCP-сервер недоступен. 1) Попробуй через 5 секунд (sleep 5 в bash). 2) Используй [ACTION: bash] curl для прямого API. 3) Делегируй задачу субагенту.${escalation}`;
     else
-      guidance = `${base}Ошибка MCP. Проверь формат: server: <id>, tool: <имя>, args: {}. Или используй другой способ выполнить задачу.`;
+      guidance = `${base}Ошибка MCP. 1) Проверь формат args (JSON). 2) Попробуй другой tool на том же сервере. 3) Используй [ACTION: bash] или [ACTION: delegate] как альтернативу.${escalation}`;
   } else if (actionName === 'read_file') {
-    if (err.includes('не найден')) guidance = `${base}Файл не найден. Проверь путь через [ACTION: bash] ls`;
-    else if (err.includes('бинарный')) guidance = `${base}Файл бинарный. Отправь через [ACTION: file]`;
-    else guidance = `${base}Попробуй другой путь или используй [ACTION: bash] cat`;
+    if (err.includes('не найден')) guidance = `${base}Файл не найден. 1) [ACTION: bash] ls для поиска. 2) [ACTION: bash] find для рекурсивного поиска. 3) Создай файл если нужно.${escalation}`;
+    else if (err.includes('бинарный')) guidance = `${base}Файл бинарный. Отправь через [ACTION: file] без чтения.${escalation}`;
+    else guidance = `${base}1) [ACTION: bash] cat файл. 2) Другой путь. 3) [ACTION: bash] find для поиска.${escalation}`;
   } else if (actionName === 'edit_file') {
-    if (err.includes('old_text не найден')) guidance = `${base}Текст не найден. Сначала прочитай файл через [ACTION: read_file], затем скопируй точный текст для замены.`;
-    else guidance = `${base}Проверь формат: path:, old_text:, new_text: — каждое на новой строке.`;
+    if (err.includes('old_text не найден')) guidance = `${base}Текст не найден. ОБЯЗАТЕЛЬНО: 1) [ACTION: read_file] чтобы увидеть ТОЧНОЕ содержимое. 2) Скопируй текст ТОЧНО как есть. 3) Или используй [ACTION: bash] sed/node -e для замены.${escalation}`;
+    else guidance = `${base}1) Проверь формат: path:, old_text:, new_text: на отдельных строках. 2) Или [ACTION: bash] для прямого редактирования. 3) Или [ACTION: write_file] для перезаписи.${escalation}`;
   } else if (actionName === 'write_file') {
-    guidance = `${base}Проверь формат: path: и content: на отдельных строках. Или используй [ACTION: bash] для создания файла.`;
+    guidance = `${base}1) Проверь формат: path: и content:. 2) [ACTION: bash] для создания через heredoc/echo. 3) Проверь что директория существует (mkdir -p).${escalation}`;
   } else if (actionName === 'web_fetch') {
-    if (err.includes('timeout')) guidance = `${base}Сайт не отвечает. Попробуй [ACTION: bash] curl --max-time 10`;
-    else guidance = `${base}Ошибка загрузки. Проверь URL или используй [ACTION: search] для поиска информации.`;
+    if (err.includes('timeout')) guidance = `${base}Сайт не отвечает. 1) [ACTION: bash] curl --max-time 10 URL. 2) [ACTION: search] для поиска альтернативного источника. 3) [ACTION: delegate] role=researcher.${escalation}`;
+    else guidance = `${base}1) Проверь URL. 2) [ACTION: bash] curl. 3) [ACTION: search] для поиска. 4) Другой источник информации.${escalation}`;
   } else if (actionName === 'http_request') {
-    if (err.includes('timeout')) guidance = `${base}Сервер не отвечает. Попробуй [ACTION: bash] curl.`;
-    else guidance = `${base}Проверь URL, метод, headers и body. Формат headers: JSON-объект.`;
+    if (err.includes('timeout')) guidance = `${base}Сервер не отвечает. 1) [ACTION: bash] curl с timeout. 2) Другой endpoint. 3) Повторить через 5с.${escalation}`;
+    else guidance = `${base}1) Проверь URL, метод, headers, body. 2) [ACTION: bash] curl как альтернатива. 3) Упрости запрос.${escalation}`;
   } else if (actionName === 'search') {
-    guidance = `${base}Поиск не удался. Попробуй переформулировать запрос или используй [ACTION: web_fetch] с конкретным URL.`;
+    guidance = `${base}Поиск не удался. 1) Переформулируй запрос (короче, другие слова). 2) [ACTION: web_fetch] с конкретным URL. 3) [ACTION: delegate] role=researcher. 4) [ACTION: bash] curl для прямого доступа.${escalation}`;
   } else if (actionName === 'delegate') {
-    guidance = `${base}Субагент не справился. Попробуй другую роль, упрости задачу, или выполни сам через [ACTION: bash].`;
+    guidance = `${base}Субагент не справился. 1) ДРУГАЯ роль (coder→executor, researcher→data_analyst). 2) Упрости задачу в 2 раза. 3) [ACTION: parallel] с 2-3 субагентами. 4) Выполни сам через [ACTION: bash].${escalation}`;
+  } else if (actionName === 'parallel') {
+    guidance = `${base}Параллельное выполнение не удалось. 1) Запусти задачи последовательно через [ACTION: delegate]. 2) Уменьши количество агентов. 3) Увеличь timeout. 4) Упрости задачи.${escalation}`;
   } else
-    guidance = `${base}Найди альтернативный подход. Используй другое действие или измени параметры.`;
+    guidance = `${base}НАЙДИ АЛЬТЕРНАТИВУ: ${alts.map(a => `[ACTION: ${a}]`).join(', ')}. Измени подход полностью.${escalation}`;
 
-  // Опыт через Zep — семантический поиск при prefetch
+  // Добавляем альтернативы если не упомянуты в guidance
+  if (!guidance.includes('Альтернативн') && retryCount >= 1) {
+    guidance += altHint;
+  }
 
   return guidance;
 };
@@ -6971,10 +7180,10 @@ const estimateComplexity = (text, agentEnabled, chatId = null) => {
     }
   }
 
-  if (score <= 2) return { maxSteps: 4, complexity: 'simple' };
-  if (score <= 5) return { maxSteps: 7, complexity: 'medium' };
-  if (score <= 8) return { maxSteps: 10, complexity: 'complex' };
-  return { maxSteps: 15, complexity: 'very_complex' };
+  if (score <= 2) return { maxSteps: 6, complexity: 'simple' };
+  if (score <= 5) return { maxSteps: 10, complexity: 'medium' };
+  if (score <= 8) return { maxSteps: 15, complexity: 'complex' };
+  return { maxSteps: 25, complexity: 'very_complex' };
 };
 
 // === Agent: выполнение действий ===
@@ -7160,6 +7369,36 @@ function executeRemindAction(chatId, body) {
 
 function executeScheduleAction(chatId, body) {
   const lines = body.split('\n');
+
+  // Новый формат с именованными полями: task:, delay:, context:, notify:
+  const taskLine = lines.find(l => /^task:\s*/i.test(l));
+  const delayLine = lines.find(l => /^delay:\s*/i.test(l));
+
+  if (taskLine && delayLine) {
+    // ── Новый формат (agent-based) ──
+    const task = taskLine.replace(/^task:\s*/i, '').trim();
+    const delayStr = delayLine.replace(/^delay:\s*/i, '').trim();
+    const delayMs = parseTimeString(delayStr);
+    if (!delayMs) return { success: false, output: 'Ошибка: неверный формат delay (примеры: 30m, 2h, 1d)' };
+    if (delayMs < 60000) return { success: false, output: 'Ошибка: минимум 1 минута' };
+
+    const contextLine = lines.find(l => /^context:\s*/i.test(l));
+    const notifyLine = lines.find(l => /^notify:\s*/i.test(l));
+    const context = contextLine ? contextLine.replace(/^context:\s*/i, '').trim() : '';
+    const notify = notifyLine ? notifyLine.replace(/^notify:\s*/i, '').trim().toLowerCase() !== 'no' : true;
+
+    const id = nextScheduleId++;
+    const fireAt = Date.now() + delayMs;
+    if (!config.scheduledActions) config.scheduledActions = [];
+    config.scheduledActions.push({ id, chatId, actionName: 'agent', actionBody: task, description: task.slice(0, 80), context, notify, fireAt });
+    saveConfig();
+    const timerId = setTimeout(() => fireScheduledAction(id), delayMs);
+    scheduledTimers.set(id, timerId);
+    const notifyNote = notify ? '' : ' (без уведомления)';
+    return { success: true, output: `⏰ Агентная задача #${id} запланирована через ${formatTimeLeft(delayMs)}${notifyNote}: "${task.slice(0, 100)}"` };
+  }
+
+  // ── Старый формат (обратная совместимость) ──
   const delayMs = parseTimeString(lines[0] || '');
   if (!delayMs) return { success: false, output: 'Ошибка: строка 1: время (число или "2ч", "1д")' };
   if (delayMs < 60000) return { success: false, output: 'Ошибка: минимум 1 минута' };
@@ -7171,7 +7410,7 @@ function executeScheduleAction(chatId, body) {
   if (!actionName || !actionBody) {
     return { success: false, output: 'Ошибка: строка 1: время, строка 2: тип действия, строка 3+: тело действия' };
   }
-  const allowedActions = ['bash', 'image', 'video', 'remind', 'file', 'mcp'];
+  const allowedActions = ['bash', 'image', 'video', 'remind', 'file', 'mcp', 'agent'];
   if (!allowedActions.includes(actionName)) {
     return { success: false, output: `Допустимые действия: ${allowedActions.join(', ')}` };
   }
@@ -7224,6 +7463,132 @@ function executeTodoAction(chatId, body) {
   if (dueAt) msg += `\n⏰ Дедлайн: ${formatFireTime(dueAt)}`;
   if (category !== 'general') msg += `\n📂 Категория: ${category}`;
   return { success: true, output: msg };
+}
+
+function executeTodoManageAction(chatId, body) {
+  const lines = body.split('\n');
+  const fields = {};
+  for (const line of lines) {
+    const m = line.match(/^(add|complete|list|update|delete|priority|due|category|status|text)\s*:\s*(.+)/i);
+    if (m) fields[m[1].toLowerCase()] = m[2].trim();
+  }
+
+  if (!config.todos) config.todos = [];
+
+  // ── LIST ──
+  if (fields.list) {
+    const filter = fields.category || fields.status;
+    let todos = config.todos.filter(t => t.chatId === chatId);
+    if (fields.status) todos = todos.filter(t => t.status === fields.status);
+    if (fields.category) todos = todos.filter(t => t.category === fields.category);
+    if (!todos.length) return { success: true, output: '📋 Нет задач' + (filter ? ` с фильтром "${filter}"` : '') };
+    const PRIORITY_ICONS = { 1: '⚪', 2: '🟡', 3: '🔴' };
+    const STATUS_ICONS = { pending: '⬜', done: '✅', in_progress: '🔄', cancelled: '❌' };
+    const list = todos.map(t => {
+      const pi = PRIORITY_ICONS[t.priority] || '⚪';
+      const si = STATUS_ICONS[t.status] || '⬜';
+      const due = t.dueAt ? ` ⏰${new Date(t.dueAt).toLocaleDateString('ru')}` : '';
+      return `${si} #${t.id} ${pi} ${t.text}${due}`;
+    }).join('\n');
+    return { success: true, output: `📋 Задачи (${todos.length}):\n${list}` };
+  }
+
+  // ── ADD ──
+  if (fields.add) {
+    const priority = fields.priority ? Math.min(3, Math.max(1, parseInt(fields.priority) || 1)) : 1;
+    const category = fields.category || 'general';
+    let dueAt = null;
+    if (fields.due) {
+      const dueMs = parseTimeString(fields.due);
+      if (dueMs) dueAt = Date.now() + dueMs;
+    }
+    const id = nextTodoId++;
+    config.todos.push({ id, chatId, text: fields.add, status: 'pending', createdAt: Date.now(), priority, category, dueAt });
+    saveConfig();
+    return { success: true, output: `📋 Задача #${id} создана: ${fields.add}` };
+  }
+
+  // ── COMPLETE ──
+  if (fields.complete) {
+    const tid = parseInt(fields.complete);
+    const todo = config.todos.find(t => t.id === tid && t.chatId === chatId);
+    if (!todo) return { success: false, output: `Задача #${tid} не найдена` };
+    todo.status = 'done';
+    todo.completedAt = Date.now();
+    saveConfig();
+    return { success: true, output: `✅ Задача #${tid} завершена: ${todo.text}` };
+  }
+
+  // ── UPDATE ──
+  if (fields.update) {
+    const tid = parseInt(fields.update);
+    const todo = config.todos.find(t => t.id === tid && t.chatId === chatId);
+    if (!todo) return { success: false, output: `Задача #${tid} не найдена` };
+    if (fields.text) todo.text = fields.text;
+    if (fields.priority) todo.priority = Math.min(3, Math.max(1, parseInt(fields.priority) || todo.priority));
+    if (fields.category) todo.category = fields.category;
+    if (fields.status) todo.status = fields.status;
+    if (fields.due) {
+      const dueMs = parseTimeString(fields.due);
+      if (dueMs) todo.dueAt = Date.now() + dueMs;
+    }
+    saveConfig();
+    return { success: true, output: `📝 Задача #${tid} обновлена` };
+  }
+
+  // ── DELETE ──
+  if (fields.delete) {
+    const tid = parseInt(fields.delete);
+    const idx = config.todos.findIndex(t => t.id === tid && t.chatId === chatId);
+    if (idx === -1) return { success: false, output: `Задача #${tid} не найдена` };
+    config.todos.splice(idx, 1);
+    saveConfig();
+    return { success: true, output: `🗑 Задача #${tid} удалена` };
+  }
+
+  return { success: false, output: 'Укажите операцию: add, complete, list, update или delete' };
+}
+
+async function executeQualityCheckAction(chatId, body) {
+  const lines = body.split('\n');
+  const fields = { criteria: [], target: '' };
+  let inCriteria = false;
+  for (const line of lines) {
+    const targetMatch = line.match(/^target:\s*(.+)/i);
+    if (targetMatch) { fields.target = targetMatch[1].trim(); inCriteria = false; continue; }
+    if (/^criteria:\s*$/i.test(line)) { inCriteria = true; continue; }
+    if (inCriteria && /^-\s+/.test(line)) { fields.criteria.push(line.replace(/^-\s+/, '').trim()); continue; }
+    if (/^criteria:\s*(.+)/i.test(line)) {
+      fields.criteria.push(line.replace(/^criteria:\s*/i, '').trim());
+      continue;
+    }
+  }
+
+  if (!fields.criteria.length) return { success: false, output: 'Укажите criteria (список критериев)' };
+  if (!fields.target) return { success: false, output: 'Укажите target (что проверять)' };
+
+  const prompt = `You are a quality control inspector. Evaluate the following work against the given criteria.
+
+TARGET (work to evaluate):
+${fields.target}
+
+CRITERIA:
+${fields.criteria.map((c, i) => `${i + 1}. ${c}`).join('\n')}
+
+For each criterion, respond:
+- ✅ PASS: [brief reason]
+- ❌ FAIL: [what's wrong]
+
+Then give overall verdict: QA PASS or QA FAIL
+Keep response concise (under 500 chars).`;
+
+  try {
+    const result = await callAI('gemini-2.5-flash', [{ role: 'user', content: prompt }], 'You are a strict QA inspector.', false, chatId);
+    const verdict = result.includes('QA FAIL') ? '❌ QA FAIL' : '✅ QA PASS';
+    return { success: true, output: `🔍 Проверка качества:\n${result.slice(0, 1500)}\n\n${verdict}` };
+  } catch (e) {
+    return { success: false, output: `Ошибка QA: ${e.message}` };
+  }
 }
 
 async function executeSearchAction(query, chatId) {
@@ -7427,9 +7792,9 @@ async function executePlanAction(chatId, body, statusUpdater) {
   const goalMatch = body.match(/goal:\s*(.+)/i);
   const goal = goalMatch ? goalMatch[1].trim() : 'Цель не указана';
 
-  const subtaskMatches = [...body.matchAll(/- id:\s*(\d+),\s*role:\s*([\w\-а-яёА-ЯЁ]+),\s*task:\s*(.+?)(?:,\s*priority:\s*(\w+))?(?:,\s*deps:\s*\[([^\]]*)\])?$/gm)];
+  const subtaskMatches = [...body.matchAll(/- id:\s*(\d+),\s*role:\s*([\w\-а-яёА-ЯЁ]+),\s*task:\s*(.+?)(?:,\s*priority:\s*(\w+))?(?:,\s*deps:\s*\[([^\]]*)\])?(?:,\s*schedule:\s*(\S+))?$/gm)];
   if (subtaskMatches.length === 0) {
-    return { success: false, output: 'plan: подзадачи не найдены. Формат: - id: N, role: X, task: Y, deps: [N]' };
+    return { success: false, output: 'plan: подзадачи не найдены. Формат: - id: N, role: X, task: Y, deps: [N], schedule: 2h' };
   }
 
   const plan = {
@@ -7440,6 +7805,7 @@ async function executePlanAction(chatId, body, statusUpdater) {
       task: m[3].trim(),
       priority: (m[4] || 'medium').trim(),
       deps: m[5] ? m[5].split(',').map(d => parseInt(d.trim())).filter(Boolean) : [],
+      schedule: m[6] ? m[6].trim() : null,
       status: 'pending',
     })),
     createdAt: Date.now(),
@@ -7453,7 +7819,8 @@ async function executePlanAction(chatId, body, statusUpdater) {
   const planDisplay = plan.subtasks.map(st => {
     const roleInfo = getAgentRoleInfo(chatId, st.role);
     const depsStr = st.deps.length > 0 ? ` (после: ${st.deps.join(',')})` : '';
-    return `  ${st.id}. ${roleInfo.icon} ${st.role}: ${st.task.slice(0, 80)}${depsStr}`;
+    const schedStr = st.schedule ? ` ⏰${st.schedule}` : '';
+    return `  ${st.id}. ${roleInfo.icon} ${st.role}: ${st.task.slice(0, 80)}${depsStr}${schedStr}`;
   }).join('\n');
 
   if (statusUpdater) statusUpdater(`📋 План: ${plan.subtasks.length} подзадач`);
@@ -8417,6 +8784,296 @@ async function executeHttpRequestAction(chatId, body) {
   }
 }
 
+// === Browser Automation ===
+async function executeBrowseAction(chatId, body) {
+  if (!isAdmin(chatId)) {
+    return { success: false, output: 'browse: доступ только для администраторов' };
+  }
+
+  const lines = body.split('\n').map(l => l.trim()).filter(Boolean);
+  const params = {};
+  for (const line of lines) {
+    const kv = line.match(/^(\w+):\s*([\s\S]+)/);
+    if (kv) params[kv[1].toLowerCase()] = kv[2].trim();
+  }
+
+  const action = params.action || lines[0]?.split(/\s+/)[0]?.toLowerCase();
+  if (!action) {
+    return { success: false, output: 'browse: требуется действие (goto, click, type, screenshot, evaluate, extract, etc.)' };
+  }
+
+  const BROWSE_TIMEOUT = 120_000;
+
+  try {
+    switch (action) {
+      case 'goto': {
+        const url = params.url || lines[0]?.replace(/^goto\s+/i, '').trim();
+        if (!url || (!url.startsWith('http://') && !url.startsWith('https://'))) {
+          return { success: false, output: 'browse goto: требуется валидный URL (http/https)' };
+        }
+        try {
+          const urlObj = new URL(url);
+          if (isPrivateHost(urlObj.hostname)) {
+            return { success: false, output: 'browse: навигация к приватным адресам запрещена' };
+          }
+        } catch (e) {
+          return { success: false, output: `browse: невалидный URL: ${e.message}` };
+        }
+
+        const page = await browserManager.getPage(chatId);
+        const resp = await page.goto(url, { waitUntil: 'networkidle2', timeout: BROWSE_TIMEOUT });
+        const title = await page.title();
+        const status = resp?.status() || 'unknown';
+
+        const session = browserManager.sessions.get(chatId);
+        if (session) session.history.push({ action: 'goto', url, title, ts: Date.now() });
+
+        const screenshotPath = `/tmp/browse_${chatId}_${Date.now()}.png`;
+        await page.screenshot({ path: screenshotPath, fullPage: false });
+        try { await sendPhoto(chatId, screenshotPath, `🌐 ${title}`); } catch (e) {}
+        try { fs.unlinkSync(screenshotPath); } catch (e) {}
+
+        return { success: true, output: `Navigated to: ${url}\nTitle: ${title}\nStatus: ${status}\nScreenshot sent to chat.` };
+      }
+
+      case 'click': {
+        const selector = params.selector || params.text || lines[0]?.replace(/^click\s+/i, '').trim();
+        if (!selector) return { success: false, output: 'browse click: требуется selector или text' };
+
+        const page = await browserManager.getPage(chatId);
+        let clicked = false;
+        try {
+          await page.click(selector, { timeout: 10000 });
+          clicked = true;
+        } catch (_) {
+          const elements = await page.$$('a, button, [role="button"], input[type="submit"], [onclick]');
+          for (const el of elements) {
+            const text = await el.evaluate(e => e.textContent?.trim());
+            if (text && text.toLowerCase().includes(selector.toLowerCase())) {
+              await el.click();
+              clicked = true;
+              break;
+            }
+          }
+        }
+        if (!clicked) return { success: false, output: `browse click: элемент не найден: ${selector}` };
+
+        await new Promise(r => setTimeout(r, 1500));
+        const title = await page.title();
+        return { success: true, output: `Clicked: ${selector}\nPage title: ${title}` };
+      }
+
+      case 'type': {
+        const selector = params.selector;
+        const value = params.value || params.text;
+        if (!selector || !value) {
+          return { success: false, output: 'browse type: требуются поля selector: и value:' };
+        }
+        const page = await browserManager.getPage(chatId);
+        await page.click(selector, { timeout: 10000 });
+        // Очистить поле перед вводом
+        await page.evaluate((sel) => {
+          const el = document.querySelector(sel);
+          if (el) el.value = '';
+        }, selector);
+        await page.type(selector, value, { delay: 50 });
+        return { success: true, output: `Typed "${value.slice(0, 50)}${value.length > 50 ? '...' : ''}" into ${selector}` };
+      }
+
+      case 'select': {
+        const selector = params.selector;
+        const value = params.value;
+        if (!selector || !value) {
+          return { success: false, output: 'browse select: требуются поля selector: и value:' };
+        }
+        const page = await browserManager.getPage(chatId);
+        await page.select(selector, value);
+        return { success: true, output: `Selected "${value}" in ${selector}` };
+      }
+
+      case 'screenshot': {
+        const page = await browserManager.getPage(chatId);
+        const fullPage = params.full === 'true' || params.fullpage === 'true';
+        const screenshotPath = `/tmp/browse_${chatId}_${Date.now()}.png`;
+        await page.screenshot({ path: screenshotPath, fullPage });
+        const title = await page.title();
+        try { await sendPhoto(chatId, screenshotPath, `📸 ${title}`); } catch (e) {}
+        try { fs.unlinkSync(screenshotPath); } catch (e) {}
+        return { success: true, output: `Screenshot sent. Page: ${title}` };
+      }
+
+      case 'evaluate':
+      case 'eval': {
+        const script = params.script || params.code || lines.slice(1).join('\n').trim()
+          || lines[0]?.replace(/^eval(uate)?\s+/i, '').trim();
+        if (!script) return { success: false, output: 'browse evaluate: требуется JavaScript код' };
+        const page = await browserManager.getPage(chatId);
+        const result = await page.evaluate((code) => {
+          try { return eval(code); } catch (e) { return `Error: ${e.message}`; }
+        }, script);
+        const output = typeof result === 'object' ? JSON.stringify(result, null, 2) : String(result ?? 'undefined');
+        return { success: true, output: truncateOutput(`[eval result]\n${output}`) };
+      }
+
+      case 'wait': {
+        const target = params.selector || params.time || params.seconds
+          || lines[0]?.replace(/^wait\s+/i, '').trim();
+        if (!target) return { success: false, output: 'browse wait: требуется selector или число секунд' };
+        const page = await browserManager.getPage(chatId);
+        if (/^\d+$/.test(target)) {
+          const ms = Math.min(parseInt(target), 30) * 1000;
+          await new Promise(r => setTimeout(r, ms));
+          return { success: true, output: `Waited ${parseInt(target)} seconds` };
+        } else {
+          await page.waitForSelector(target, { timeout: BROWSE_TIMEOUT });
+          return { success: true, output: `Element appeared: ${target}` };
+        }
+      }
+
+      case 'scroll': {
+        const direction = params.direction || 'down';
+        const amount = parseInt(params.amount || params.pixels || '500');
+        const page = await browserManager.getPage(chatId);
+        const deltaY = direction === 'up' ? -amount : amount;
+        await page.evaluate((dy) => window.scrollBy(0, dy), deltaY);
+        return { success: true, output: `Scrolled ${direction} by ${Math.abs(amount)}px` };
+      }
+
+      case 'extract': {
+        const selector = params.selector || lines[0]?.replace(/^extract\s+/i, '').trim();
+        if (!selector) return { success: false, output: 'browse extract: требуется CSS selector' };
+        const page = await browserManager.getPage(chatId);
+        const data = await page.$$eval(selector, els =>
+          els.slice(0, 50).map(el => ({
+            tag: el.tagName.toLowerCase(),
+            text: el.textContent?.trim().slice(0, 200),
+            href: el.href || undefined,
+            src: el.src || undefined,
+          }))
+        );
+        return { success: true, output: truncateOutput(`[extract "${selector}"] ${data.length} elements\n${JSON.stringify(data, null, 2)}`) };
+      }
+
+      case 'cookies_set': {
+        const domain = params.domain;
+        const name = params.name;
+        const value = params.value;
+        if (!domain || !name || !value) {
+          return { success: false, output: 'browse cookies_set: требуются domain, name, value' };
+        }
+        const page = await browserManager.getPage(chatId);
+        await page.setCookie({
+          name, value, domain, path: '/',
+          secure: params.secure === 'true' || domain.includes('google'),
+        });
+        return { success: true, output: `Cookie set: ${name} on ${domain}` };
+      }
+
+      case 'cookies_get': {
+        const page = await browserManager.getPage(chatId);
+        const cookies = await page.cookies();
+        const summary = cookies.slice(0, 30).map(c => `${c.name}=${c.value.slice(0, 20)}... (${c.domain})`);
+        return { success: true, output: truncateOutput(`${cookies.length} cookies:\n${summary.join('\n')}`) };
+      }
+
+      case 'cookies_save': {
+        await browserManager.saveCookies(chatId);
+        return { success: true, output: 'Cookies saved to disk.' };
+      }
+
+      case 'tabs':
+      case 'tab_list': {
+        const session = browserManager.sessions.get(chatId);
+        if (!session) return { success: false, output: 'No browser session' };
+        const pages = await session.browser.pages();
+        const tabs = [];
+        for (let i = 0; i < pages.length; i++) {
+          const title = await pages[i].title().catch(() => '(untitled)');
+          tabs.push(`${i}: ${title} — ${pages[i].url()}`);
+        }
+        return { success: true, output: `${pages.length} tabs:\n${tabs.join('\n')}` };
+      }
+
+      case 'tab_switch': {
+        const index = parseInt(params.index || params.tab || '0');
+        const session = browserManager.sessions.get(chatId);
+        if (!session) return { success: false, output: 'No browser session' };
+        const pages = await session.browser.pages();
+        if (index < 0 || index >= pages.length) return { success: false, output: `Tab ${index} not found (${pages.length} tabs)` };
+        session.page = pages[index];
+        await pages[index].bringToFront();
+        return { success: true, output: `Switched to tab ${index}: ${await pages[index].title()}` };
+      }
+
+      case 'tab_new': {
+        const session = await browserManager.getOrCreate(chatId);
+        const newPage = await session.browser.newPage();
+        await newPage.setViewport({ width: 1920, height: 1080 });
+        session.page = newPage;
+        if (params.url) {
+          await newPage.goto(params.url, { waitUntil: 'networkidle2', timeout: BROWSE_TIMEOUT });
+        }
+        return { success: true, output: `New tab opened${params.url ? ': ' + params.url : ''}` };
+      }
+
+      case 'fill_form': {
+        // Пакетное заполнение формы: field1: value1\nfield2: value2
+        const page = await browserManager.getPage(chatId);
+        const fields = Object.entries(params).filter(([k]) => !['action'].includes(k));
+        let filled = 0;
+        for (const [selector, value] of fields) {
+          try {
+            await page.click(selector, { timeout: 5000 });
+            await page.evaluate((sel) => { const el = document.querySelector(sel); if (el) el.value = ''; }, selector);
+            await page.type(selector, value, { delay: 30 });
+            filled++;
+          } catch (e) {
+            // Пробуем по name/id
+            try {
+              const sel = `[name="${selector}"], #${selector}`;
+              await page.click(sel, { timeout: 5000 });
+              await page.evaluate((s) => { const el = document.querySelector(s); if (el) el.value = ''; }, sel);
+              await page.type(sel, value, { delay: 30 });
+              filled++;
+            } catch (e2) {}
+          }
+        }
+        return { success: filled > 0, output: `Filled ${filled}/${fields.length} form fields` };
+      }
+
+      case 'close': {
+        await browserManager.close(chatId);
+        return { success: true, output: 'Browser session closed. Cookies saved.' };
+      }
+
+      case 'status': {
+        const sessions = browserManager.listSessions();
+        if (sessions.length === 0) return { success: true, output: 'No active browser sessions.' };
+        const info = sessions.map(s =>
+          `Chat ${s.chatId}: ${s.connected ? 'ALIVE' : 'DEAD'}, age=${s.age}s, idle=${s.idle}s, history=${s.historyLength}`
+        );
+        return { success: true, output: info.join('\n') };
+      }
+
+      default:
+        return { success: false, output: `browse: неизвестная команда "${action}". Доступны: goto, click, type, select, screenshot, evaluate, wait, scroll, extract, fill_form, cookies_set, cookies_get, cookies_save, tabs, tab_switch, tab_new, close, status` };
+    }
+  } catch (e) {
+    const msg = e.message?.slice(0, 500) || String(e);
+    // При ошибке навигации или таймауте — пробуем скриншот для контекста
+    if (action === 'goto' || action === 'click') {
+      try {
+        const page = await browserManager.getPage(chatId);
+        const errScreenPath = `/tmp/browse_err_${chatId}_${Date.now()}.png`;
+        await page.screenshot({ path: errScreenPath, fullPage: false });
+        await sendPhoto(chatId, errScreenPath, `⚠️ Error: ${msg.slice(0, 100)}`);
+        try { fs.unlinkSync(errScreenPath); } catch (_) {}
+      } catch (_) {}
+    }
+    return { success: false, output: `browse error: ${msg}` };
+  }
+}
+
 // === Execute Plan (автовыполнение плана) ===
 // === Agentic subtask runner: full agent loop for a single subtask ===
 async function runSubAgentLoop(chatId, task, role, context, maxSteps, opts = {}) {
@@ -8522,8 +9179,50 @@ async function executeAutoplan(chatId, statusUpdater) {
       return { success: false, output: `execute_plan: циклическая зависимость или невыполнимые задачи. Pending: ${[...pending].join(',')}` };
     }
 
+    // Разделяем на немедленные и отложенные задачи
+    const immediate = ready.filter(st => !st.schedule);
+    const deferred = ready.filter(st => st.schedule);
+
+    // Отложенные → создаём scheduledAction с agent типом
+    for (const st of deferred) {
+      const delayMs = parseTimeString(st.schedule);
+      if (delayMs && delayMs >= 60000) {
+        const depsContext = st.deps.map(d => {
+          const depResult = results.get(d);
+          const depTask = subtasks.find(s => s.id === d);
+          return depResult ? `Результат #${d} (${depTask?.role}): ${depResult.output.slice(0, 500)}` : '';
+        }).filter(Boolean).join('\n');
+
+        const id = nextScheduleId++;
+        const fireAt = Date.now() + delayMs;
+        if (!config.scheduledActions) config.scheduledActions = [];
+        config.scheduledActions.push({
+          id, chatId, actionName: 'agent',
+          actionBody: `[DEFERRED PLAN SUBTASK]\nЦель плана: ${plan.goal}\nПодзадача: ${st.task}\nРоль: ${st.role}\n${depsContext ? `Контекст зависимостей:\n${depsContext}` : ''}`,
+          description: `План: ${st.task.slice(0, 60)}`,
+          context: `Deferred from plan "${plan.goal}"`,
+          fireAt
+        });
+        saveConfig();
+        const timerId = setTimeout(() => fireScheduledAction(id), delayMs);
+        scheduledTimers.set(id, timerId);
+
+        // Помечаем как deferred с плейсхолдер-результатом
+        st.status = 'deferred';
+        results.set(st.id, { success: true, output: `⏰ Отложено на ${st.schedule} (scheduled #${id})`, actions: [] });
+        pending.delete(st.id);
+        totalDone++;
+        if (tracker) tracker.log.push({ ts: Date.now(), text: `⏰ #${st.id} ${st.role}: отложено на ${st.schedule}` });
+      } else {
+        // Невалидный schedule — выполнить сразу
+        immediate.push(st);
+      }
+    }
+
+    if (immediate.length === 0) continue;
+
     // Выполняем через пул конкурентности (лимит параллельных AI-вызовов)
-    const batchTasks = ready.map(st => ({
+    const batchTasks = immediate.map(st => ({
       id: `plan-${chatId}-${st.id}`,
       meta: { role: st.role, priority: st.priority, chatId },
       fn: async () => {
@@ -8591,20 +9290,49 @@ async function executeAutoplan(chatId, statusUpdater) {
     }
   }
 
+  // Quality Gate: автоматическая проверка качества при ≥2 успешных подзадачах
+  let qaVerdict = '';
+  const successResults = [...results.entries()].filter(([, r]) => r.success);
+  if (successResults.length >= 2) {
+    try {
+      const summary = successResults.map(([id, r]) => {
+        const st = subtasks.find(s => s.id === id);
+        return `#${id} (${st?.role}): ${(r.output || '').slice(0, 300)}`;
+      }).join('\n---\n');
+      const qaPrompt = `Ты QA-инспектор. Оцени результаты выполнения плана "${plan.goal}".
+
+Результаты подзадач:
+${summary.slice(0, 3000)}
+
+Проверь:
+1. Все ли подзадачи согласованы между собой?
+2. Есть ли противоречия в результатах?
+3. Покрывают ли результаты цель плана?
+
+Ответь кратко (до 300 символов): QA PASS + резюме или QA FLAG + что не так.`;
+      const qaResult = await callAI('gemini-2.5-flash', [{ role: 'user', content: qaPrompt }], 'Strict QA inspector', false, chatId);
+      qaVerdict = qaResult.includes('QA FLAG') ? `\n\n⚠️ QA FLAG: ${qaResult.slice(0, 400)}` : `\n\n✅ QA PASS: ${qaResult.slice(0, 200)}`;
+    } catch (e) {
+      qaVerdict = `\n\n⚠️ QA: не удалось проверить (${e.message})`;
+    }
+  }
+
   // Формируем итоговый отчёт
   const report = subtasks.map(st => {
     const r = results.get(st.id);
-    const icon = r?.success ? '✅' : '❌';
+    const icon = st.status === 'deferred' ? '⏰' : r?.success ? '✅' : '❌';
     const actionsInfo = r?.actions?.length ? ` [${r.actions.map(a => `${a.success ? '✓' : '✗'}${a.name}`).join(', ')}]` : '';
     return `${icon} #${st.id} ${st.role}: ${st.task.slice(0, 60)}${actionsInfo}\n   ${(r?.output || 'нет результата').slice(0, 300)}`;
   }).join('\n\n');
 
   const successCount = [...results.values()].filter(r => r.success).length;
+  const deferredCount = subtasks.filter(st => st.status === 'deferred').length;
   const domainLabel = taskDomain ? ` | ${BUSINESS_DOMAINS[taskDomain]?.label}` : '';
+  const deferredLabel = deferredCount > 0 ? ` | ⏰ отложено: ${deferredCount}` : '';
 
   return {
     success: successCount > 0,
-    output: `[AUTOPLAN: ${successCount}/${subtasks.length} успешно${domainLabel}]\n🎯 ${plan.goal}\n\n${report}\n[/AUTOPLAN]`,
+    output: `[AUTOPLAN: ${successCount}/${subtasks.length} успешно${deferredLabel}${domainLabel}]\n🎯 ${plan.goal}\n\n${report}${qaVerdict}\n[/AUTOPLAN]`,
   };
 }
 
@@ -8637,6 +9365,8 @@ async function _executeActionInner(chatId, action, statusUpdater) {
     case 'remind': return executeRemindAction(chatId, action.body);
     case 'schedule': return executeScheduleAction(chatId, action.body);
     case 'todo': return executeTodoAction(chatId, action.body);
+    case 'todo_manage': return executeTodoManageAction(chatId, action.body);
+    case 'quality_check': return await executeQualityCheckAction(chatId, action.body);
     case 'search': return await executeSearchAction(action.body, chatId);
     case 'file': return await executeFileAction(chatId, action.body);
     case 'read_file': return await executeReadFileAction(chatId, action.body);
@@ -8662,6 +9392,7 @@ async function _executeActionInner(chatId, action, statusUpdater) {
     case 'memory': return executeMemoryAction(chatId, action.body);
     case 'delegate': return await executeDelegateAction(chatId, action.body, statusUpdater);
     case 'autonomous': return await executeAutonomousAction(chatId, action.body, statusUpdater);
+    case 'browse': return await executeBrowseAction(chatId, action.body);
     default: {
       // === Plugin SDK: попытка выполнить action через плагин ===
       if (global.pluginManager?.hasAction(action.name)) {
@@ -9453,8 +10184,9 @@ async function _runClaudeInner(chatId, text) {
     let finalText = '';
     let lastActionResult = null; // трекаем последний результат действия
     const actionRetries = new Map();
-    const MAX_RETRIES_PER_ACTION = 2;
-    const MAX_TOTAL_RETRIES = 4;
+    const MAX_RETRIES_PER_ACTION = 3;
+    const MAX_TOTAL_RETRIES = 8;
+    const failureLog = []; // трекинг ошибок для детекции зацикливания
     let totalRetries = 0;
 
     while (step < maxSteps) {
@@ -9715,11 +10447,40 @@ async function _runClaudeInner(chatId, text) {
         time: Date.now()
       });
 
-      // Умная самокоррекция: per-action retry + error-type-aware guidance + self-learning
+      // === Умная самокоррекция: per-action retry + stuck detection + model escalation + strategy switching ===
       if (!actionResult.success) {
         const actionTypeRetries = actionRetries.get(action.name) || 0;
         const canRetryAction = actionTypeRetries < MAX_RETRIES_PER_ACTION;
         const canRetryTotal = totalRetries < MAX_TOTAL_RETRIES;
+
+        // --- Stuck-loop detection: если одна и та же ошибка повторяется ---
+        const errSignature = `${action.name}:${actionResult.output.slice(0, 80).replace(/\d+/g, 'N')}`;
+        failureLog.push(errSignature);
+        const sameErrorCount = failureLog.filter(e => e === errSignature).length;
+        const isStuck = sameErrorCount >= 2; // одна и та же ошибка дважды = зацикливание
+
+        if (isStuck && canRetryTotal) {
+          // Зацикливание обнаружено — принудительная смена стратегии
+          totalRetries++;
+          actionRetries.set(action.name, MAX_RETRIES_PER_ACTION); // блокируем этот тип
+          updateStatus({
+            phase: `🔄 Зацикливание! Смена стратегии...`,
+            error: `${action.name}: одна и та же ошибка ${sameErrorCount}x`
+          });
+          tracker.log.push({ ts: Date.now(), text: `🔄 STUCK: ${action.name} → смена подхода` });
+
+          const alts = ACTION_ALTERNATIVES[action.name] || ['bash', 'delegate'];
+          const stuckGuidance = `⚠️ ЗАЦИКЛИВАНИЕ ОБНАРУЖЕНО: действие "${action.name}" даёт ОДНУ И ТУ ЖЕ ошибку ${sameErrorCount} раз подряд.
+
+🚫 ЗАПРЕЩЕНО повторять "${action.name}" с похожими параметрами.
+✅ ОБЯЗАТЕЛЬНО используй ДРУГОЕ действие: ${alts.map(a => `[ACTION: ${a}]`).join(', ')}.
+
+Перестрой подход ПОЛНОСТЬЮ. Если задача — выполнить команду, используй node -e. Если задача — получить данные, делегируй. Если задача — создать файл, используй write_file или bash heredoc.`;
+
+          messages.push({ role: 'assistant', content: responseText });
+          messages.push({ role: 'user', content: `[ERROR: ${action.name}]\n${actionResult.output}\n[/ERROR]\n\n${stuckGuidance}` });
+          continue;
+        }
 
         if (canRetryAction && canRetryTotal) {
           actionRetries.set(action.name, actionTypeRetries + 1);
@@ -9730,7 +10491,16 @@ async function _runClaudeInner(chatId, text) {
           });
           tracker.log.push({ ts: Date.now(), text: `🔧 Retry ${action.name}: ${actionResult.output.slice(0, 80)}` });
 
-          const errorGuidance = getRetryGuidance(action.name, actionResult.output);
+          const errorGuidance = getRetryGuidance(action.name, actionResult.output, actionTypeRetries);
+
+          // --- Model escalation: если >4 общих ошибок, эскалируем на более сильную модель ---
+          if (totalRetries >= 4 && !model.includes('opus') && !model.includes('pro')) {
+            const escalationModels = ['gemini-2.5-pro', 'claude-sonnet', 'gpt-4.1'];
+            const escalatedModel = escalationModels.find(m => m !== model) || model;
+            tracker.log.push({ ts: Date.now(), text: `🚀 Escalation: ${model} → ${escalatedModel}` });
+            // Подменяем модель для следующего вызова через cliOpts
+            if (typeof cliOpts === 'object') cliOpts.escalatedModel = escalatedModel;
+          }
 
           messages.push({ role: 'assistant', content: responseText });
           messages.push({
@@ -9740,16 +10510,28 @@ async function _runClaudeInner(chatId, text) {
           continue;
         }
 
-        // Исчерпаны попытки для этого типа — предложить альтернативу
+        // Исчерпаны попытки для этого типа — предложить конкретные альтернативы
         if (!canRetryAction && canRetryTotal) {
           totalRetries++;
+          const alts = ACTION_ALTERNATIVES[action.name] || ['bash', 'delegate'];
           updateStatus({
-            phase: `🔄 Ищу альтернативный подход...`,
+            phase: `🔄 Смена стратегии → ${alts[0]}...`,
             error: `${action.name}: исчерпаны попытки`
           });
-          tracker.log.push({ ts: Date.now(), text: `🔄 ${action.name}: смена стратегии` });
+          tracker.log.push({ ts: Date.now(), text: `🔄 ${action.name}: смена на ${alts.join('/')}` });
 
-          const altGuidance = `Действие "${action.name}" не работает после ${MAX_RETRIES_PER_ACTION} попыток. Используй ДРУГОЙ тип действия для решения задачи.`;
+          const altGuidance = `🚫 Действие "${action.name}" НЕ РАБОТАЕТ после ${MAX_RETRIES_PER_ACTION} попыток.
+
+КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать "${action.name}" снова.
+✅ ОБЯЗАТЕЛЬНО используй ДРУГОЙ тип действия: ${alts.map(a => `[ACTION: ${a}]`).join(', ')}.
+
+Конкретные стратегии:
+${action.name === 'bash' ? '• [ACTION: delegate] role=executor — делегируй выполнение\n• node -e "..." — используй Node.js вместо bash' : ''}
+${action.name === 'delegate' ? '• [ACTION: bash] — выполни напрямую через команду\n• [ACTION: parallel] — попробуй несколько подходов одновременно' : ''}
+${action.name === 'image' ? '• Перепиши промпт РАДИКАЛЬНО, максимум 20 слов, на English\n• [ACTION: bash] node -e — создай SVG для схем/диаграмм' : ''}
+${!['bash', 'delegate', 'image'].includes(action.name) ? `• ${alts.map(a => `[ACTION: ${a}]`).join('\n• ')}` : ''}
+
+Ты ДОЛЖЕН найти способ выполнить задачу. У тебя достаточно инструментов.`;
 
           messages.push({ role: 'assistant', content: responseText });
           messages.push({
@@ -9759,9 +10541,24 @@ async function _runClaudeInner(chatId, text) {
           continue;
         }
 
+        // Все retry исчерпаны — но НЕ сдаёмся, а даём финальный шанс
+        if (totalRetries >= MAX_TOTAL_RETRIES && step < maxSteps - 1) {
+          updateStatus({ phase: '🔥 Последняя попытка...', error: 'Все retry исчерпаны' });
+          messages.push({ role: 'assistant', content: responseText });
+          messages.push({
+            role: 'user',
+            content: `[ERROR: ${action.name}]\n${actionResult.output}\n[/ERROR]\n\n🔥 ВСЕ ПОПЫТКИ ИСЧЕРПАНЫ. Это ПОСЛЕДНИЙ шанс. Дай пользователю ХОТЬ КАКОЙ-ТО результат. Если основная задача невыполнима — предложи ближайшую альтернативу или частичный результат. НЕ говори "не удалось" без конкретного объяснения и предложения.`
+          });
+          totalRetries = MAX_TOTAL_RETRIES - 1; // даём ещё 1 попытку
+          continue;
+        }
+
         updateStatus({ error: actionResult.output.slice(0, 100) });
       } else {
         updateStatus({ error: null });
+        // Успех — сбрасываем failure log для этого типа
+        const idx = failureLog.lastIndexOf(failureLog.find(e => e.startsWith(action.name + ':')));
+        if (idx >= 0) failureLog.splice(idx, 1);
       }
 
       messages.push({ role: 'assistant', content: responseText });
@@ -9845,7 +10642,7 @@ async function _runClaudeInner(chatId, text) {
     autoSendMentionedFiles(chatId, displayText);
 
     if (step >= maxSteps && parseAction(finalText)) {
-      send(chatId, `⚠️ Достигнут лимит шагов (${maxSteps}). Задача может быть не завершена.`);
+      send(chatId, `⚠️ Достигнут лимит шагов (${maxSteps}). Напишите "продолжай" чтобы я продолжил выполнение.`);
     }
 
   } catch (e) {
@@ -10282,6 +11079,18 @@ async function processUpdate(upd) {
     return;
   }
 
+  // === Quick Actions из меню ===
+  if (waitingTextPrompt.has(chatId)) {
+    waitingTextPrompt.delete(chatId);
+    runClaude(chatId, `Напиши качественный текст по запросу: ${text}`);
+    return;
+  }
+  if (waitingSearchQuery.has(chatId)) {
+    waitingSearchQuery.delete(chatId);
+    runClaude(chatId, `Найди в интернете: ${text}`);
+    return;
+  }
+
   // === Plugin SDK: обработка плагиновых команд ===
   if (text.startsWith('/') && global.pluginManager) {
     const parts = text.slice(1).split(/\s+/);
@@ -10478,6 +11287,33 @@ async function processUpdate(upd) {
   if (text === '/stop') { stopTask(chatId); sendTemp(chatId, '⛔ Остановлено'); return; }
   if (text === '/settings') { send(chatId, '⚙️ Настройки', settingsMenu(chatId)); return; }
   if (text === '/help') { send(chatId, helpText(), mainMenu(chatId)); return; }
+  if (text === '/profile') {
+    const uc = getUserConfig(chatId);
+    const history = chatHistory.get(chatId) || [];
+    const mode = uc.mode || 'обычный';
+    const model = uc.model || 'auto';
+    const imgModel = uc.imageModel || 'nano-banana';
+    const vidModel = uc.videoModel || 'veo-3.1-fast';
+    const agent = uc.agentMode ? '✅' : '❌';
+    const mem = uc.memory ? '✅' : '❌';
+    const todos = (config.todos || []).filter(t => t.chatId === chatId);
+    const rems = (config.reminders || []).filter(r => r.chatId === chatId);
+    send(chatId, `👤 *Ваш профиль*
+
+🧠 Модель: \`${model}\`
+🎭 Режим: ${mode}
+🤖 Агент: ${agent}
+💾 Память: ${mem}
+
+📊 *Статистика:*
+💬 Сообщений в истории: ${history.length}
+✅ Задач: ${todos.length}
+⏰ Напоминаний: ${rems.length}
+
+🎨 Модель изображений: \`${imgModel}\`
+🎬 Модель видео: \`${vidModel}\``, { parse_mode: 'Markdown' });
+    return;
+  }
   if (text === '/chats') {
     try {
       const users = JSON.parse(fs.readFileSync(path.join(__dirname, 'users.json'), 'utf8'));
@@ -11195,6 +12031,9 @@ function gracefulShutdown(signal) {
 
   if (miniappServer) miniappServer.close();
 
+  // Закрываем браузерные сессии
+  try { browserManager?.destroyAll(); } catch (e) { }
+
   // Отключаем MTProto
   if (mtClient) {
     mtClient.disconnect().catch(() => { });
@@ -11374,6 +12213,7 @@ tgApi('setMyCommands', {
     { command: 'menu', description: '📋 Открыть меню' },
     { command: 'settings', description: '⚙️ Настройки' },
     { command: 'mode', description: '🎭 Режимы AI' },
+    { command: 'profile', description: '👤 Профиль и статистика' },
     { command: 'help', description: '❓ Помощь' },
     { command: 'tasks', description: '📋 Активные задачи' },
     { command: 'stop', description: '⛔ Остановить задачу' },
