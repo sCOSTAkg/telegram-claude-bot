@@ -11,7 +11,8 @@
     "status": "pm2 status scorp-bot",
     "logs": "pm2 logs scorp-bot --lines 50",
     "monit": "pm2 monit",
-    "dev": "node bot.js"
+    "dev": "node bot.js",
+    "check:doc-links": "node scripts/check-doc-links.js"
   },
   "keywords": [
     "telegram",

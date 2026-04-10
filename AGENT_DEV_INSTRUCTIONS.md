@@ -1,11 +1,15 @@
 # 🤖 ИНСТРУКЦИЯ ДЛЯ АГЕНТА-РАЗРАБОТЧИКА sCORP
 
+> **Актуально на 10 апреля 2026**
+>
+> Эта инструкция описывает текущую структуру проекта, но файлы, директории и команды могут меняться по мере развития системы. Перед изменениями сверяйтесь с фактическим содержимым репозитория (`./bot.js`, `./config`, `./modules` и т.д.).
+
 ## ⚡ БЫСТРЫЙ СТАРТ
-- **Главный файл**: `/Users/guest1/Desktop/sCORP/bot.js` (~570KB, ~7100 строк)
-- **Конфиг**: `/Users/guest1/Desktop/sCORP/config.json`
-- **Пользовательские данные**: `/Users/guest1/Desktop/sCORP/users.json`
-- **Модули**: `/Users/guest1/Desktop/sCORP/modules/` (13 файлов)
-- **PID файл**: `/Users/guest1/Desktop/sCORP/bot.pid`
+- **Главный файл**: `./bot.js` (~570KB, ~7100 строк)
+- **Конфиг**: `./config.json`
+- **Пользовательские данные**: `./users.json`
+- **Модули**: `./modules/` (13 файлов)
+- **PID файл**: `./bot.pid`
 - **Перезагрузка бота**: `kill $(cat bot.pid); node bot.js &`
 
 ---
@@ -126,7 +130,7 @@
 ## 📁 СТРУКТУРА ФАЙЛОВ
 
 ```
-/Users/guest1/Desktop/sCORP/
+./
 ├── bot.js                          # Главный файл (570KB)
 ├── config.json                     # Конфиг (mtproto, channels, reminders)
 ├── users.json                      # Пользовательские данные
@@ -200,7 +204,7 @@ kill $(cat bot.pid)
 
 ### Запуск бота
 ```bash
-cd /Users/guest1/Desktop/sCORP
+cd .
 node bot.js &
 ```
 
