@@ -19,7 +19,7 @@ const {
   StatusFormatter,
   BackgroundTasksUI,
   SpinnerManager,
-} = require('./progress-tracker');
+} = require('./progress_tracker');
 
 // Создать глобальные инстансы
 const backgroundTasksUI = new BackgroundTasksUI();
@@ -574,11 +574,11 @@ backgroundTasksUI.cleanup(maxAgeMinutes)         // Очистить стары�
 
 ## Тестирование
 
-Для тестирования используй примеры из `progress-tracker-examples.js`:
+Для тестирования используй примеры из `progress_tracker_examples.js`:
 
 ```bash
 node -e "
-const { ProgressTracker, StatusFormatter } = require('./progress-tracker');
+const { ProgressTracker, StatusFormatter } = require('./progress_tracker');
 
 const tracker = new ProgressTracker('voice', 'Распознаю голосовое');
 console.log(StatusFormatter.formatQuick(tracker));

@@ -541,6 +541,7 @@ setInterval(() => {
 - **`progress_tracker.js`** — основной модуль (ProgressTracker, MultiTaskSupervisor)
 - **`progress_tracker_examples.js`** — примеры интеграции
 - **`PROGRESS_TRACKER_GUIDE.md`** — этот файл
+- **`progress-tracker.js`** — временный shim для обратной совместимости (`module.exports = require('./progress_tracker')`)
 
 ---
 
