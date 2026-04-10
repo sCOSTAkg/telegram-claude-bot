@@ -6,6 +6,7 @@ const { execSync, execFile, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const AIProvider = require('./src/ai/provider');
 
 // === Zep Cloud Memory ===
 const zepMemory = require('./zep_memory');
@@ -97,6 +98,7 @@ const CODEX_CLI_PATH = process.env.CODEX_CLI_PATH || '/opt/homebrew/bin/codex';
 let tmpCounter = 0;
 const CODEX_OPENAI_MODELS = new Set(['codex', 'codex-mini', 'codex-latest', 'codex-mini-latest', 'gpt-5-codex', 'gpt-5.3-codex']);
 let codexCliAvailableCache = null;
+let aiProvider = null;
 
 // === AGENT EXPERIENCE (через Zep Cloud) ===
 
@@ -603,6 +605,7 @@ async function callAnthropic(modelId, messages, systemPrompt, allowMcp = true, c
   });
 }
 
+// DEPRECATED (compat layer for one release): use AIProvider.call via callAI().
 async function callOpenAI(modelId, messages, systemPrompt, chatId) {
   const uc = chatId ? getUserConfig(chatId) : defaultUserConfig;
   const key = uc.apiKeys?.openai || process.env.OPENAI_API_KEY;
@@ -641,6 +644,7 @@ const GEMINI_THINKING_MODELS = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-3.
 // ############################################################
 // # 4. ИНТЕГРАЦИИ С AI ПРОВАЙДЕРАМИ (GEMINI, CLAUDE, OPENAI)
 // ############################################################
+// DEPRECATED (compat layer for one release): use AIProvider.call via callAI().
 async function callGemini(modelId, messages, systemPrompt, chatId) {
   const uc = chatId ? getUserConfig(chatId) : defaultUserConfig;
   const key = uc.apiKeys?.google || process.env.GEMINI_API_KEY;
@@ -711,6 +715,7 @@ async function callGemini(modelId, messages, systemPrompt, chatId) {
   throw lastError;
 }
 
+// DEPRECATED (compat layer for one release): use AIProvider.call via callAI().
 async function callGroqChat(modelId, messages, systemPrompt, chatId) {
   const uc = chatId ? getUserConfig(chatId) : defaultUserConfig;
   const key = uc.apiKeys?.groq || process.env.GROQ_API_KEY;
@@ -737,6 +742,7 @@ async function callGroqChat(modelId, messages, systemPrompt, chatId) {
   return { text, usage: data.usage };
 }
 
+// DEPRECATED (compat layer for one release): use AIProvider.call via callAI().
 async function callOpenRouter(modelId, messages, systemPrompt, chatId) {
   const uc = chatId ? getUserConfig(chatId) : defaultUserConfig;
   const key = uc.apiKeys?.openrouter || process.env.OPENROUTER_API_KEY;
@@ -763,6 +769,7 @@ async function callOpenRouter(modelId, messages, systemPrompt, chatId) {
   return { text, usage: data.usage };
 }
 
+// DEPRECATED (compat layer for one release): use AIProvider.call via callAI().
 async function callDeepSeek(modelId, messages, systemPrompt, chatId) {
   const uc = chatId ? getUserConfig(chatId) : defaultUserConfig;
   const key = uc.apiKeys?.deepseek || process.env.DEEPSEEK_API_KEY;
@@ -861,22 +868,9 @@ async function callAI(model, messages, systemPrompt, allowMcp = true, chatId = n
   const start = Date.now();
   const routed = resolveCodexRoute(model, chatId);
   const effectiveModel = routed.model;
-  const provider = getProvider(effectiveModel);
-  const modelId = MODEL_MAP[effectiveModel] || effectiveModel;
-  let result;
-  switch (provider) {
-    case 'anthropic': result = await callAnthropic(modelId, messages, systemPrompt, allowMcp, chatId, cliOpts); break;
-    case 'google': result = await callGemini(modelId, messages, systemPrompt, chatId); break;
-    case 'google-cli': result = await callGeminiCLI(modelId, messages, systemPrompt, allowMcp, chatId); break;
-    case 'codex-cli': result = await callCodexCLI(modelId, messages, systemPrompt, chatId); break;
-    case 'groq': result = await callGroqChat(modelId, messages, systemPrompt, chatId); break;
-    case 'openrouter': result = await callOpenRouter(modelId, messages, systemPrompt, chatId); break;
-    case 'deepseek': result = await callDeepSeek(modelId, messages, systemPrompt, chatId); break;
-    case 'openai': result = await callOpenAI(modelId, messages, systemPrompt, chatId); break;
-    case 'ollama': result = await callOllama(modelId, messages, systemPrompt, chatId); break;
-    default: return { text: `[Fallback] Неизвестный провайдер: ${provider}` };
-  }
-  return { ...result, ms: Date.now() - start, provider, model: effectiveModel, requestedModel: model, codexRouted: routed.routed };
+  if (!aiProvider) throw new Error('AIProvider is not initialized');
+  const result = await aiProvider.call(effectiveModel, messages, systemPrompt, { allowMcp, chatId, cliOpts });
+  return { ...result, ms: Date.now() - start, requestedModel: model, codexRouted: routed.routed };
 }
 
 // === MediaPromptEngine: AI-powered prompt enhancement ===
@@ -1667,6 +1661,16 @@ const AUTO_MODEL_CATEGORIES = {
   general: { label: '💬 Общий', default: 'gemini-2.5-flash' },
 };
 const defaultUserConfig = { model: 'claude-haiku', workDir: '/tmp', timeout: 300, historySize: 20, systemPrompt: '', language: '', skills: [], pins: [], autoModel: false, agentMode: true, agentMaxSteps: 10, thinking: false, role: 'user', banned: false, customAgents: [], apiKeys: {}, imageModel: 'nano-banana', imageAspect: '1:1', imageSize: '1K', videoModel: 'veo-3.1-fast', videoResolution: '720p', videoAspect: '16:9', videoDuration: '8', autoModelMap: {}, modelStats: {}, categoryPerf: {}, mcpServers: [], activeMode: null, modelSettings: {} };
+aiProvider = new AIProvider({
+  claudePath: CLAUDE_PATH,
+  geminiCliPath: GEMINI_CLI_PATH,
+  codexCliPath: CODEX_CLI_PATH,
+  getUserConfig: (chatId) => getUserConfig(chatId),
+  defaultUserConfig,
+  buildClaudeCliArgs,
+  buildGeminiCliArgs,
+  buildCodexCliArgs,
+});
 const userConfigs = new Map(); // chatId -> config
 const cancellableOperations = new Map(); // chatId -> { isCancelled: false }
 
