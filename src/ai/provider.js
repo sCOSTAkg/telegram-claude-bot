@@ -14,7 +14,14 @@ class AIProvider {
   constructor(options = {}) {
     this.claudePath = options.claudePath || '/opt/homebrew/bin/claude';
     this.geminiCliPath = options.geminiCliPath || '/opt/homebrew/bin/gemini';
+    this.codexCliPath = options.codexCliPath || '/opt/homebrew/bin/codex';
     this.defaultTimeout = options.defaultTimeout || 120000;
+    this.defaultUserConfig = options.defaultUserConfig || {};
+    this.getUserConfig = options.getUserConfig || (() => null);
+    this.buildClaudeCliArgs = options.buildClaudeCliArgs || null;
+    this.buildGeminiCliArgs = options.buildGeminiCliArgs || null;
+    this.buildCodexCliArgs = options.buildCodexCliArgs || null;
+    this.spawn = options.spawn || spawn;
   }
 
   getProvider(model) {
@@ -37,9 +44,12 @@ class AIProvider {
   }
 
   async call(model, messages, systemPrompt, options = {}) {
-    const { chatId = null, allowMcp = true, timeout = this.defaultTimeout } = options;
+    const { chatId = null, allowMcp = true, timeout = null, cliOpts = {} } = options;
     const provider = this.getProvider(model);
     const modelId = this.getMappedModel(model);
+    const uc = chatId ? (this.getUserConfig(chatId) || this.defaultUserConfig) : this.defaultUserConfig;
+    const modelSettings = uc?.modelSettings?.[modelId] || {};
+    const effectiveTimeout = timeout || (uc?.timeout || 120) * 1000;
 
     const start = Date.now();
     let result;
@@ -47,28 +57,31 @@ class AIProvider {
     try {
       switch (provider) {
         case 'anthropic':
-          result = await this.callAnthropic(modelId, messages, systemPrompt, { chatId, allowMcp, timeout });
+          result = await this.callAnthropic(modelId, messages, systemPrompt, { chatId, allowMcp, timeout: effectiveTimeout, cliOpts, uc });
           break;
         case 'google-cli':
-          result = await this.callGeminiCLI(modelId, messages, systemPrompt, { chatId, allowMcp, timeout });
+          result = await this.callGeminiCLI(modelId, messages, systemPrompt, { chatId, allowMcp, timeout: effectiveTimeout, uc });
+          break;
+        case 'codex-cli':
+          result = await this.callCodexCLI(modelId, messages, systemPrompt, { chatId, timeout: Math.max(effectiveTimeout, 180000), uc });
           break;
         case 'openai':
-          result = await this.callOpenAI(modelId, messages, systemPrompt, { chatId, timeout });
+          result = await this.callOpenAI(modelId, messages, systemPrompt, { chatId, timeout: effectiveTimeout, modelSettings, uc });
           break;
         case 'google':
-          result = await this.callGemini(modelId, messages, systemPrompt, { chatId, timeout });
+          result = await this.callGemini(modelId, messages, systemPrompt, { chatId, timeout: effectiveTimeout, modelSettings, uc });
           break;
         case 'groq':
-          result = await this.callGroq(modelId, messages, systemPrompt, { chatId, timeout });
+          result = await this.callGroq(modelId, messages, systemPrompt, { chatId, timeout: effectiveTimeout, modelSettings, uc });
           break;
         case 'deepseek':
-          result = await this.callDeepSeek(modelId, messages, systemPrompt, { chatId, timeout });
+          result = await this.callDeepSeek(modelId, messages, systemPrompt, { chatId, timeout: effectiveTimeout, modelSettings, uc });
           break;
         case 'openrouter':
-          result = await this.callOpenRouter(modelId, messages, systemPrompt, { chatId, timeout });
+          result = await this.callOpenRouter(modelId, messages, systemPrompt, { chatId, timeout: effectiveTimeout, modelSettings, uc });
           break;
         case 'ollama':
-          result = await this.callOllama(modelId, messages, systemPrompt, { chatId, timeout });
+          result = await this.callOllama(modelId, messages, systemPrompt, { chatId, timeout: effectiveTimeout, modelSettings, uc });
           break;
         default:
           throw new Error(`Unknown provider: ${model}`);
@@ -88,11 +101,13 @@ class AIProvider {
   async callAnthropic(modelId, messages, systemPrompt, opts) {
     const { timeout = this.defaultTimeout } = opts;
     const prompt = this._buildPrompt(messages, systemPrompt);
+    const args = this.buildClaudeCliArgs
+      ? this.buildClaudeCliArgs(modelId, messages, systemPrompt, opts.allowMcp, opts.chatId, [], opts.cliOpts).args
+      : ['--no-cache', '--model', modelId, '--yolo'];
 
     return new Promise((resolve, reject) => {
-      const args = ['--no-cache', '--model', modelId, '--yolo'];
-      const child = spawn(this.claudePath, args, {
-        cwd: process.env.WORKING_DIR || os.homedir(),
+      const child = this.spawn(this.claudePath, args, {
+        cwd: opts.uc?.workDir || process.env.WORKING_DIR || os.homedir(),
         env: { ...process.env, CLAUDECODE: undefined },
         stdio: ['pipe', 'pipe', 'pipe'],
       });
@@ -122,7 +137,7 @@ class AIProvider {
 
   async callOpenAI(modelId, messages, systemPrompt, opts) {
     const { timeout = this.defaultTimeout } = opts;
-    const apiKey = process.env.OPENAI_API_KEY;
+    const apiKey = opts.uc?.apiKeys?.openai || process.env.OPENAI_API_KEY;
     if (!apiKey) throw new Error('OPENAI_API_KEY not set');
 
     const msgs = [];
@@ -131,10 +146,13 @@ class AIProvider {
 
     const isReasoning = /^(o[134]|o[134]-mini)/.test(modelId);
     const body = { model: modelId, messages: msgs };
+    const defaultMaxTokens = isReasoning ? 16384 : 8192;
+    const maxTokens = opts.modelSettings.maxTokens !== undefined ? opts.modelSettings.maxTokens : defaultMaxTokens;
     if (isReasoning) {
-      body.max_completion_tokens = 16384;
+      body.max_completion_tokens = maxTokens;
     } else {
-      body.max_tokens = 8192;
+      body.max_tokens = maxTokens;
+      if (opts.modelSettings.temperature !== undefined) body.temperature = opts.modelSettings.temperature;
     }
 
     const res = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -156,7 +174,7 @@ class AIProvider {
 
   async callGemini(modelId, messages, systemPrompt, opts) {
     const { timeout = this.defaultTimeout } = opts;
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = opts.uc?.apiKeys?.google || process.env.GEMINI_API_KEY;
     if (!apiKey) throw new Error('GEMINI_API_KEY not set');
 
     const contents = messages.map((m) => ({
@@ -166,7 +184,9 @@ class AIProvider {
 
     const isThinking = GEMINI_THINKING_MODELS.includes(modelId);
     const isFlashThinking = isThinking && modelId.includes('flash');
-    const genConfig = { maxOutputTokens: isThinking ? (isFlashThinking ? 8192 : 16384) : 8192 };
+    const defaultMaxTokens = isThinking ? (isFlashThinking ? 8192 : 16384) : 8192;
+    const genConfig = { maxOutputTokens: opts.modelSettings.maxTokens !== undefined ? opts.modelSettings.maxTokens : defaultMaxTokens };
+    if (opts.modelSettings.temperature !== undefined) genConfig.temperature = opts.modelSettings.temperature;
     if (isThinking) {
       genConfig.thinkingConfig = { thinkingBudget: isFlashThinking ? 2048 : 8192 };
     }
@@ -174,29 +194,52 @@ class AIProvider {
     const body = { contents, generationConfig: genConfig };
     if (systemPrompt) body.systemInstruction = { parts: [{ text: systemPrompt }] };
 
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(timeout),
-      }
-    );
+    const maxRetries = 2;
+    let lastError = null;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+            body: JSON.stringify(body),
+            signal: AbortSignal.timeout(timeout),
+          }
+        );
+        if (!res.ok) {
+          let errText = `Gemini API Error (${res.status})`;
+          const errData = await res.json().catch(() => ({}));
+          if (errData.error?.message) errText = `Gemini API Error (${res.status}): ${errData.error.message}`;
+          if ((res.status === 429 || res.status === 503) && attempt < maxRetries) {
+            await new Promise((r) => setTimeout(r, (res.status === 429 ? 3000 : 1500) * (attempt + 1)));
+            lastError = new Error(errText);
+            continue;
+          }
+          throw new Error(errText);
+        }
 
-    const data = await res.json();
-    if (data.error) throw new Error(data.error.message);
-    const parts = data.candidates?.[0]?.content?.parts || [];
-    const text = parts.filter((p) => !p.thought).map((p) => p.text).join('') || '';
-    if (!text && data.candidates?.[0]?.finishReason === 'SAFETY') {
-      throw new Error('Blocked by safety filter');
+        const data = await res.json();
+        if (data.error) throw new Error(data.error.message);
+        const parts = data.candidates?.[0]?.content?.parts || [];
+        const text = parts.filter((p) => !p.thought).map((p) => p.text).join('') || '';
+        if (!text && data.candidates?.[0]?.finishReason === 'SAFETY') throw new Error('Blocked by safety filter');
+        return { text, usage: data.usageMetadata };
+      } catch (error) {
+        if (attempt < maxRetries && /(429|503|UNAVAILABLE|exhausted)/i.test(error.message || '')) {
+          await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+          lastError = error;
+          continue;
+        }
+        throw error;
+      }
     }
-    return { text, usage: data.usageMetadata };
+    throw lastError || new Error('Gemini failed after retries');
   }
 
   async callGroq(modelId, messages, systemPrompt, opts) {
     const { timeout = Math.min(opts.timeout || this.defaultTimeout, 90000) } = opts;
-    const apiKey = process.env.GROQ_API_KEY;
+    const apiKey = opts.uc?.apiKeys?.groq || process.env.GROQ_API_KEY;
     if (!apiKey) throw new Error('GROQ_API_KEY not set');
 
     const msgs = [];
@@ -209,7 +252,12 @@ class AIProvider {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`,
       },
-      body: JSON.stringify({ model: modelId, messages: msgs, max_tokens: 8192 }),
+      body: JSON.stringify({
+        model: modelId,
+        messages: msgs,
+        max_tokens: opts.modelSettings.maxTokens !== undefined ? opts.modelSettings.maxTokens : 8192,
+        ...(opts.modelSettings.temperature !== undefined ? { temperature: opts.modelSettings.temperature } : {}),
+      }),
       signal: AbortSignal.timeout(timeout),
     });
 
@@ -222,7 +270,7 @@ class AIProvider {
 
   async callDeepSeek(modelId, messages, systemPrompt, opts) {
     const { timeout = this.defaultTimeout } = opts;
-    const apiKey = process.env.DEEPSEEK_API_KEY;
+    const apiKey = opts.uc?.apiKeys?.deepseek || process.env.DEEPSEEK_API_KEY;
     if (!apiKey) throw new Error('DEEPSEEK_API_KEY not set');
 
     const msgs = [];
@@ -235,7 +283,12 @@ class AIProvider {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`,
       },
-      body: JSON.stringify({ model: modelId, messages: msgs, max_tokens: 8192 }),
+      body: JSON.stringify({
+        model: modelId,
+        messages: msgs,
+        max_tokens: opts.modelSettings.maxTokens !== undefined ? opts.modelSettings.maxTokens : 8192,
+        ...(opts.modelSettings.temperature !== undefined ? { temperature: opts.modelSettings.temperature } : {}),
+      }),
       signal: AbortSignal.timeout(timeout),
     });
 
@@ -248,7 +301,7 @@ class AIProvider {
 
   async callOpenRouter(modelId, messages, systemPrompt, opts) {
     const { timeout = this.defaultTimeout } = opts;
-    const apiKey = process.env.OPENROUTER_API_KEY;
+    const apiKey = opts.uc?.apiKeys?.openrouter || process.env.OPENROUTER_API_KEY;
     if (!apiKey) throw new Error('OPENROUTER_API_KEY not set');
 
     const msgs = [];
@@ -261,7 +314,12 @@ class AIProvider {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`,
       },
-      body: JSON.stringify({ model: modelId, messages: msgs, max_tokens: 8192 }),
+      body: JSON.stringify({
+        model: modelId,
+        messages: msgs,
+        max_tokens: opts.modelSettings.maxTokens !== undefined ? opts.modelSettings.maxTokens : 8192,
+        ...(opts.modelSettings.temperature !== undefined ? { temperature: opts.modelSettings.temperature } : {}),
+      }),
       signal: AbortSignal.timeout(timeout),
     });
 
@@ -274,7 +332,7 @@ class AIProvider {
 
   async callOllama(modelId, messages, systemPrompt, opts) {
     const { timeout = Math.min(opts.timeout || this.defaultTimeout, 120000) } = opts;
-    const host = process.env.OLLAMA_HOST || 'http://localhost:11434';
+    const host = opts.uc?.ollamaHost || process.env.OLLAMA_HOST || 'http://localhost:11434';
 
     const msgs = [];
     if (systemPrompt) msgs.push({ role: 'system', content: systemPrompt });
@@ -283,7 +341,17 @@ class AIProvider {
     const res = await fetch(`${host}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: modelId, messages: msgs, stream: false }),
+      body: JSON.stringify({
+        model: modelId,
+        messages: msgs,
+        stream: false,
+        ...(opts.modelSettings.temperature !== undefined || opts.modelSettings.maxTokens !== undefined
+          ? { options: {
+            ...(opts.modelSettings.temperature !== undefined ? { temperature: opts.modelSettings.temperature } : {}),
+            ...(opts.modelSettings.maxTokens !== undefined ? { num_predict: opts.modelSettings.maxTokens } : {}),
+          } }
+          : {}),
+      }),
       signal: AbortSignal.timeout(timeout),
     });
 
@@ -303,10 +371,12 @@ class AIProvider {
 
     return new Promise((resolve, reject) => {
       const model = modelId === 'gemini-cli' ? 'gemini-2.5-pro' : modelId;
-      const args = ['--prompt', prompt, '--yolo', '--model', model];
+      const args = this.buildGeminiCliArgs
+        ? this.buildGeminiCliArgs(modelId, messages, systemPrompt, opts.allowMcp, opts.chatId).args
+        : ['--prompt', prompt, '--yolo', '--model', model];
 
-      const child = spawn(this.geminiCliPath, args, {
-        cwd: process.env.WORKING_DIR || os.homedir(),
+      const child = this.spawn(this.geminiCliPath, args, {
+        cwd: opts.uc?.workDir || process.env.WORKING_DIR || os.homedir(),
         env: { ...process.env, CLAUDECODE: undefined },
         stdio: ['pipe', 'pipe', 'pipe'],
       });
@@ -329,6 +399,34 @@ class AIProvider {
         } else {
           resolve({ text: stdout.trim() || 'OK', usage: null });
         }
+      });
+    });
+  }
+
+  async callCodexCLI(modelId, messages, systemPrompt, opts) {
+    const { timeout = 180000 } = opts;
+    if (!this.buildCodexCliArgs) throw new Error('Codex CLI args builder is not configured');
+    return new Promise((resolve, reject) => {
+      const { args } = this.buildCodexCliArgs(modelId, messages, systemPrompt, opts.chatId, ['--json']);
+      const child = this.spawn(this.codexCliPath, args, {
+        cwd: opts.uc?.workDir || os.homedir(),
+        env: { ...process.env, CLAUDECODE: undefined },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      child.on('error', (err) => reject(new Error(`Codex CLI: ${err.message}`)));
+      child.stdin.end();
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (d) => { stdout += d; });
+      child.stderr.on('data', (d) => { stderr += d; });
+      const killTimer = setTimeout(() => {
+        try { child.kill(); } catch (e) {}
+      }, timeout);
+      child.on('close', (code) => {
+        clearTimeout(killTimer);
+        if (code !== 0) return reject(new Error(stderr.trim() || `Exit code ${code}`));
+        if (!stdout.trim()) return reject(new Error(stderr.trim() || 'Codex CLI returned empty output'));
+        resolve({ text: stdout.trim(), usage: null });
       });
     });
   }
