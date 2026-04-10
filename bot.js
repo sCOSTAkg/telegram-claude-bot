@@ -20,9 +20,25 @@ const { SkillManager } = require('./modules/skillManager');
 const { IntegrationHub } = require('./modules/integrationHub');
 const { Orchestrator } = require('./modules/orchestrator');
 const { BrowserManager } = require('./modules/browserManager');
+const { createTaskManager } = require('./src/bot/runtime/task-manager');
+const { validateInitData: validateMiniAppInitData, serializeMiniAppState } = require('./src/bot/runtime/miniapp-state');
+const { createUpdateLoop } = require('./src/bot/transport/telegram/update-loop');
+const { createContractCommands } = require('./src/bot/commands/contract-commands');
+const { createActionExecutors } = require('./src/bot/actions/action-executors');
 
 // === Browser automation ===
 const browserManager = new BrowserManager();
+const modularActionExecutors = createActionExecutors({
+  fetch,
+  AbortSignal,
+  URL,
+  isAdmin,
+  isPrivateHost,
+  truncateOutput,
+  browserManager,
+  sendPhoto,
+  fs,
+});
 
 // === Parallel Engine: глобальный пул конкурентности ===
 const globalPool = new ConcurrencyPool(4); // макс 4 параллельных AI-вызова
@@ -2730,8 +2746,9 @@ function langMenu() {
 const _mcpTempFiles = new Set();
 
 // === Переделанная система очереди: параллельная обработка ===
-// activeTasks: Map<chatId, Map<taskId, taskInfo>> - поддержка нескольких параллельных задач
-const activeTasks = new Map(); // chatId -> Map<taskId, taskInfo>
+// activeTasks/backgroundTasks вынесены в src/bot/runtime/task-manager.js
+const taskManager = createTaskManager();
+const { activeTasks, backgroundTasks } = taskManager;
 let fgTaskCounter = 0; // счетчик для генерации уникальных taskId
 
 function generateFgTaskId() {
@@ -2739,8 +2756,7 @@ function generateFgTaskId() {
 }
 
 function getActiveFgTasks(chatId) {
-  if (!activeTasks.has(chatId)) activeTasks.set(chatId, new Map());
-  return activeTasks.get(chatId);
+  return taskManager.getOrCreateActiveTaskMap(chatId);
 }
 
 function getActiveFgTasksCount(chatId) {
@@ -2758,7 +2774,6 @@ function acquireChatLock(chatId) {
 }
 
 // === Фоновые задачи ===
-const backgroundTasks = new Map(); // chatId -> Map<taskId, taskInfo>
 const MAX_BG_TASKS_PER_USER = 3;
 const MAX_CONCURRENT_TASKS_PER_USER = 5; // макс параллельных fg-задач на пользователя
 let bgTaskCounter = 0;
@@ -2774,8 +2789,7 @@ function getTotalActiveCount(chatId) {
 }
 
 function getUserBgTasks(chatId) {
-  if (!backgroundTasks.has(chatId)) backgroundTasks.set(chatId, new Map());
-  return backgroundTasks.get(chatId);
+  return taskManager.getOrCreateBackgroundTaskMap(chatId);
 }
 let waitingDir = new Set();
 let waitingSystemPrompt = new Set();
@@ -2914,12 +2928,7 @@ function cleanupOldStatusData() {
     if (!lock.locked && !activeTasks.has(chatId)) chatLocks.delete(chatId);
   }
   // Чистка пустых activeTasks/backgroundTasks entries
-  for (const [chatId, tasks] of activeTasks) {
-    if (tasks.size === 0) activeTasks.delete(chatId);
-  }
-  for (const [chatId, tasks] of backgroundTasks) {
-    if (tasks.size === 0) backgroundTasks.delete(chatId);
-  }
+  taskManager.pruneEmpty();
   // Adaptive resource monitoring: stop if nobody is tracked
   if (resourceMonitors.size === 0 && resourceMonitorInterval) stopResourceMonitoring();
   // TTL-очистка sessionFrames: base64 данные съедают RAM
@@ -8747,6 +8756,9 @@ async function executeDelegateAction(chatId, body, statusUpdater) {
 // === OpenClaw-like Web Tools ===
 
 async function executeWebFetchAction(body, chatId = null) {
+  if (modularActionExecutors?.executeWebFetchAction) {
+    return modularActionExecutors.executeWebFetchAction(body, chatId);
+  }
   const lines = body.split('\n').map(l => l.trim()).filter(Boolean);
   let url = lines[0];
   for (const line of lines) {
@@ -8793,6 +8805,9 @@ async function executeWebFetchAction(body, chatId = null) {
 }
 
 async function executeHttpRequestAction(chatId, body) {
+  if (modularActionExecutors?.executeHttpRequestAction) {
+    return modularActionExecutors.executeHttpRequestAction(chatId, body);
+  }
   const methodMatch = body.match(/^method:\s*(\w+)/im);
   const urlMatch = body.match(/^url:\s*(.+)/im);
   const headersMatch = body.match(/^headers:\s*(\{[\s\S]*?\})\s*$/im);
@@ -8838,6 +8853,10 @@ async function executeHttpRequestAction(chatId, body) {
 
 // === Browser Automation ===
 async function executeBrowseAction(chatId, body) {
+  if (modularActionExecutors?.executeBrowseAction) {
+    const modularResult = await modularActionExecutors.executeBrowseAction(chatId, body);
+    if (modularResult?.success || !/legacy/.test(modularResult?.output || '')) return modularResult;
+  }
   if (!isAdmin(chatId)) {
     return { success: false, output: 'browse: доступ только для администраторов' };
   }
@@ -11171,6 +11190,25 @@ async function processUpdate(upd) {
     }
   }
 
+  // === Контрактные команды (тонкая обёртка над модулем src/bot/commands) ===
+  if (text.startsWith('/')) {
+    const contractCommands = createContractCommands({
+      orchestrator,
+      superAgentHandlers: global.superAgentHandlers,
+      pluginManager: global.pluginManager,
+      executeBashAction,
+      send,
+      tgApi,
+    });
+    const parts = text.split(/\s+/);
+    const cmd = parts[0].slice(1).toLowerCase();
+    const cmdBody = parts.slice(1).join(' ').trim();
+    if (cmd === 'plugins' && await contractCommands.handlePlugins(chatId)) return;
+    if (cmd === 'bash' && await contractCommands.handleBash(chatId, text, uc.workDir || '/tmp')) return;
+    if (['team', 'agents', 'skills', 'reuse', 'team-status', 'task-history'].includes(cmd) && await contractCommands.handleTeam(chatId, text)) return;
+    if (['orchestrate', 'orch', 'do'].includes(cmd) && await contractCommands.handleOrchestrate(chatId, cmdBody)) return;
+  }
+
   // === Super Agent Commands: обработка ===
   if (text.startsWith('/') && global.superAgentHandlers) {
     const cmdList = ['team', 'agents', 'skills', 'reuse', 'team-status', 'task-history'];
@@ -11806,14 +11844,15 @@ async function processUpdate(upd) {
 // # 8. ОСНОВНОЙ ЦИКЛ (MAIN POLLING LOOP)
 // ############################################################
 async function tick() {
+  const updateLoop = createUpdateLoop({
+    processUpdateImpl: processUpdate,
+    tgApi,
+    getOffset: () => offset,
+    setOffset: (v) => { offset = v; },
+  });
   while (!stopPolling) {
     try {
-      const data = await tgApi('getUpdates', { offset, timeout: 30, allowed_updates: ['message', 'callback_query'] }, 45000);
-      if (!data.ok || !data.result) continue;
-      for (const upd of data.result) {
-        offset = upd.update_id + 1;
-        processUpdate(upd).catch(e => console.error('UPD ERR:', e.message));
-      }
+      await updateLoop.tick();
     } catch (e) {
       console.error('Polling error:', e.message);
       await new Promise(r => setTimeout(r, 3000));
@@ -11837,22 +11876,8 @@ function setWaitingTimeout(chatId, waitingSet, label) {
 
 // === Pixel Office Mini App API ===
 const MINIAPP_URL = process.env.MINIAPP_URL || '';
-const crypto = require('crypto');
-
 function validateInitData(initDataStr, botToken) {
-  try {
-    const params = new URLSearchParams(initDataStr);
-    const hash = params.get('hash');
-    if (!hash) return null;
-    params.delete('hash');
-    const entries = [...params.entries()].sort(([a], [b]) => a.localeCompare(b));
-    const dataCheckString = entries.map(([k, v]) => `${k}=${v}`).join('\n');
-    const secretKey = crypto.createHmac('sha256', 'WebAppData').update(botToken).digest();
-    const computedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
-    if (computedHash !== hash) return null;
-    const userStr = params.get('user');
-    return userStr ? JSON.parse(userStr) : { id: 'unknown' };
-  } catch (e) { return null; }
+  return validateMiniAppInitData(initDataStr, botToken);
 }
 
 function serializeAgentState(chatId) {
@@ -11905,10 +11930,18 @@ function serializeAgentState(chatId) {
     };
   }
 
+  const baseState = serializeMiniAppState({
+    chatId,
+    activeTasks,
+    backgroundTasks,
+    multiAgent,
+    activeClaudeCount,
+  });
+
   return {
     timestamp: Date.now(),
     global: {
-      activeClaudeCount,
+      ...baseState.global,
       maxClaude: MAX_CLAUDE_PROCS,
     },
     user: {
@@ -11917,9 +11950,9 @@ function serializeAgentState(chatId) {
       multiAgent: uc.multiAgent !== false,
       activeMode: uc.activeMode || null,
     },
-    foreground,
-    background: bgList,
-    multiAgent,
+    foreground: baseState.foreground || foreground,
+    background: baseState.background?.length ? baseState.background : bgList,
+    multiAgent: baseState.multiAgent || multiAgent,
     sessionAgents: sess.map(s => ({ id: s.id, label: s.label, icon: s.icon })),
     queueSize,
     agentRoles: Object.fromEntries(Object.entries(getEffectiveAgents(chatId)).map(([k, v]) => [k, { icon: v.icon, label: v.label, desc: v.desc || v.description || '' }])),
