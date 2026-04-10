@@ -60,7 +60,8 @@ class ConfigManager {
     }
     const data = this.load();
     const value = data[key];
-    if (value) {
+    // Используем hasOwnProperty, чтобы кешировать валидные falsy-значения (false/0/''/null).
+    if (Object.prototype.hasOwnProperty.call(data, key)) {
       this._cacheSet(key, value);
     }
     return value;
