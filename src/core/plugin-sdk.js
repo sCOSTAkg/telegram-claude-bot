@@ -197,7 +197,7 @@ class PluginContext {
 
   /** Получить конфиг пользователя */
   getUserConfig(chatId) {
-    return this._api.getUserConfig?.(chatId) || {};
+    return this._api.getUserConfig?.(chatId) ?? {};
   }
 
   /** Сохранить конфиг пользователя */
@@ -351,8 +351,14 @@ class PluginManager extends EventEmitter {
     plugin._filePath = fullPath;
 
     // Загрузить сохраненный конфиг плагина
-    if (this._data[plugin.name]?.config) {
-      plugin.config = { ...plugin.config, ...this._data[plugin.name].config };
+    const pluginState = this._data[plugin.name];
+    if (
+      pluginState
+      && Object.prototype.hasOwnProperty.call(pluginState, 'config')
+      && pluginState.config !== null
+      && typeof pluginState.config === 'object'
+    ) {
+      plugin.config = { ...plugin.config, ...pluginState.config };
     }
 
     // Инициализация
