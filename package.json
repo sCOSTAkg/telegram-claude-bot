@@ -26,7 +26,7 @@
     "@getzep/zep-cloud": "^3.17.0",
     "dotenv": "^16.6.1",
     "input": "^1.0.1",
-    "node-telegram-bot-api": "^0.66.0",
+    "node-telegram-bot-api": "^1.1.0",
     "puppeteer-core": "^24.37.3",
     "telegram": "^2.26.22",
     "undici": "^7.24.0"
